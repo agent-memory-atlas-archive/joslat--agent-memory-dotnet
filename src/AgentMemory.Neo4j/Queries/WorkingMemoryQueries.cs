@@ -21,15 +21,37 @@ namespace AgentMemory.Neo4j.Queries;
 internal static class WorkingMemoryQueries
 {
     /// <summary>Stable facts: live, currently valid, salient, deterministically ordered.</summary>
+    /// <remarks>
+    /// Two orders, on purpose. WHICH facts get a slot: the most mentioned, then the most recently touched,
+    /// so a new job or city reaches the block instead of the oldest facts holding every slot forever.
+    /// HOW they are written: by creation, so re-mentioning a fact that is already in the block does not
+    /// reshuffle the text (a reshuffled text defeats the hash short-circuit and prompt-prefix caching).
+    /// </remarks>
+    /// <remarks>
+    /// <para>
+    /// <c>$byMentions</c> slots go to the most mentioned facts, then <c>$recent</c> slots to the most
+    /// recently LEARNED of the rest (by creation: a re-mention is a touch, and the point is new facts) (<c>WorkingMemoryOptions.RecentStableFactSlots</c>), so a fact said once
+    /// still gets in when the mention slots are full. <c>[null]</c> keeps a row when there is no rest, and
+    /// no <c>CALL</c> subquery is used, so this runs on every Neo4j 5.x.
+    /// </para>
+    /// </remarks>
     public const string SelectStableFacts = @"
             MATCH (f:Fact {owner_id: $ownerId})
             WHERE f.invalidated_at IS NULL
               AND (f.valid_from  IS NULL OR f.valid_from  <= datetime($now))
               AND (f.valid_until IS NULL OR f.valid_until >  datetime($now))
               AND coalesce(f.mention_count, 1) >= $minMentions
+            WITH f
+            ORDER BY coalesce(f.mention_count, 1) DESC, coalesce(f.updated_at, f.created_at) DESC, f.id ASC
+            WITH collect(f) AS ranked
+            WITH ranked[0..$byMentions] AS top, ranked[$byMentions..] AS rest
+            UNWIND (CASE WHEN size(rest) = 0 THEN [null] ELSE rest END) AS r
+            WITH top, r
+            ORDER BY r.created_at DESC, r.id ASC
+            WITH top, [x IN collect(r) WHERE x IS NOT NULL][0..$recent] AS recent
+            UNWIND top + recent AS f
             RETURN f.subject AS subject, f.predicate AS predicate, f.object AS object
-            ORDER BY coalesce(f.mention_count, 1) DESC, f.created_at ASC, f.id ASC
-            LIMIT $limit";
+            ORDER BY f.created_at ASC, f.id ASC";
 
     /// <summary>Active preferences: live and above the confidence floor.</summary>
     public const string SelectActivePreferences = @"
@@ -80,15 +102,47 @@ internal static class WorkingMemoryQueries
                 u.working_memory = $block,
                 u.working_memory_built_at = datetime($now),
                 u.working_memory_hash = $hash,
+                u.working_memory_valid_until = CASE WHEN $validUntil IS NULL THEN null ELSE datetime($validUntil) END,
                 u.updated_at = datetime($now)";
 
-    /// <summary>Reads the stored block.</summary>
+    /// <summary>
+    /// The next moment the block's content can change by itself: the earliest future
+    /// <c>valid_from</c> or <c>valid_until</c> among the owner's live facts (null when none). Stored with
+    /// the block; a read after it rebuilds, so a fact that expired is never served from a block built
+    /// before it did.
+    /// </summary>
+    public const string NextValidityBoundary = @"
+            MATCH (f:Fact {owner_id: $ownerId})
+            WHERE f.invalidated_at IS NULL
+              AND coalesce(f.mention_count, 1) >= $minMentions
+            WITH [x IN [f.valid_from, f.valid_until] WHERE x IS NOT NULL AND x > datetime($now)] AS upcoming
+            UNWIND upcoming AS boundary
+            RETURN min(boundary) AS boundary";
+
+    /// <summary>
+    /// Clears every owner's block (a prune across all owners), leaving each one due for a rebuild on
+    /// its owner's next read. See <see cref="ClearBlock"/>.
+    /// </summary>
+    public const string ClearAllBlocks = @"
+            MATCH (u:User)
+            WHERE u.working_memory IS NOT NULL
+            SET u.working_memory = null,
+                u.working_memory_built_at = null,
+                u.working_memory_hash = null,
+                u.working_memory_valid_until = datetime($now),
+                u.updated_at = datetime($now)";
+
+    /// <summary>
+    /// Reads the stored block, and its validity boundary even when there is no text: an empty or
+    /// cleared block still says when it must be rebuilt.
+    /// </summary>
     public const string GetBlock = @"
             MATCH (u:User {identifier: $ownerId})
-            WHERE u.working_memory IS NOT NULL
+            WHERE u.working_memory IS NOT NULL OR u.working_memory_valid_until IS NOT NULL
             RETURN u.working_memory AS block,
                    u.working_memory_built_at AS builtAt,
-                   u.working_memory_hash AS hash";
+                   u.working_memory_hash AS hash,
+                   u.working_memory_valid_until AS validUntil";
 
     /// <summary>Reads only the stored hash, for the rebuild short-circuit.</summary>
     public const string GetBlockHash = @"
@@ -102,11 +156,17 @@ internal static class WorkingMemoryQueries
     /// Removing the properties rather than the node: upstream owns <c>:User</c>, and deleting an
     /// identity node because our derived block failed to rebuild would destroy something that is not
     /// ours to destroy.
+    /// <para>
+    /// The text goes (a pruned or erased fact must not be served) but the block is marked due: its
+    /// validity boundary is set to now, so the owner's next read rebuilds it from what remains rather
+    /// than going without a profile until the owner happens to write again.
+    /// </para>
     /// </remarks>
     public const string ClearBlock = @"
             MATCH (u:User {identifier: $ownerId})
             SET u.working_memory = null,
                 u.working_memory_built_at = null,
                 u.working_memory_hash = null,
+                u.working_memory_valid_until = datetime($now),
                 u.updated_at = datetime($now)";
 }

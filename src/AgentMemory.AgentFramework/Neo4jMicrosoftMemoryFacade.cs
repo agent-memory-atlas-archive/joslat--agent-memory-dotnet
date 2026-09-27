@@ -18,16 +18,33 @@ public sealed class Neo4jMicrosoftMemoryFacade
     private readonly IMemoryService _memoryService;
     private readonly Neo4jChatMessageStore _messageStore;
     private readonly AgentFrameworkOptions _options;
+    private readonly IBackgroundExtraction? _backgroundExtraction;
     private readonly ILogger<Neo4jMicrosoftMemoryFacade> _logger;
     private readonly IMemoryContextAdmissionPolicy _admissionPolicy;
 
+    /// <summary>The 1.5.0 constructor, kept so assemblies compiled against it still load (an added
+    /// optional parameter is a binary break). New code uses the full constructor.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
     public Neo4jMicrosoftMemoryFacade(
         IMemoryService memoryService,
         Neo4jChatMessageStore messageStore,
         IOptions<AgentFrameworkOptions> options,
         ILogger<Neo4jMicrosoftMemoryFacade> logger,
-        IMemoryContextAdmissionPolicy? admissionPolicy = null)
+        IMemoryContextAdmissionPolicy? admissionPolicy)
+        : this(memoryService, messageStore, options, logger, admissionPolicy, backgroundExtraction: null)
     {
+    }
+
+    [Microsoft.Extensions.DependencyInjection.ActivatorUtilitiesConstructor]
+    public Neo4jMicrosoftMemoryFacade(
+        IMemoryService memoryService,
+        Neo4jChatMessageStore messageStore,
+        IOptions<AgentFrameworkOptions> options,
+        ILogger<Neo4jMicrosoftMemoryFacade> logger,
+        IMemoryContextAdmissionPolicy? admissionPolicy = null,
+        IBackgroundExtraction? backgroundExtraction = null)
+    {
+        _backgroundExtraction = backgroundExtraction;
         _memoryService = memoryService ?? throw new ArgumentNullException(nameof(memoryService));
         _messageStore = messageStore ?? throw new ArgumentNullException(nameof(messageStore));
         _options = options?.Value ?? new AgentFrameworkOptions();
@@ -100,13 +117,15 @@ public sealed class Neo4jMicrosoftMemoryFacade
             // policy, the recalled-role gate and 2.5's history dedup. A parallel implementation would
             // be a second place for all three to drift, and the drift would only show up in a corpus
             // months later.
+            // The mapper orders the kept turns by time itself (and keeps the NEWEST within its budget, which
+            // reversing first used to defeat): recall order in, chronological order out.
             var messageIds = recall.Context.RecentMessages.Items
-                .Reverse()
                 .Concat(recall.Context.RelevantMessages.Items)
                 .DistinctBy(message => message.MessageId)
                 .ToList();
 
-            return MafTypeMapper.ToContextMessages(
+            // Outside a provider pipeline nothing places the turns, so they leave unmarked (in order, framed).
+            return RecalledTurns.Unmark(MafTypeMapper.ToContextMessages(
                 recall.Context with
                 {
                     RecentMessages = recall.Context.RecentMessages with { Items = messageIds },
@@ -115,7 +134,7 @@ public sealed class Neo4jMicrosoftMemoryFacade
                 contextFormat,
                 _admissionPolicy,
                 _logger,
-                liveThread: messages).ToList();
+                liveThread: messages)).ToList();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -154,24 +173,14 @@ public sealed class Neo4jMicrosoftMemoryFacade
 
             if (_options.AutoExtractOnPersist && internalMessages.Count > 0)
             {
-                try
-                {
-                    await _memoryService.ExtractAndPersistAsync(
-                        new ExtractionRequest
-                        {
-                            Messages = internalMessages,
-                            SessionId = sessionId,
-                            UserId = userId
-                        }, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Extraction failed for session {SessionId}; messages were persisted.", sessionId);
-                }
+                await TurnExtraction.ExtractAsync(
+                    _memoryService,
+                    new ExtractionRequest
+                    {
+                        Messages = internalMessages,
+                        SessionId = sessionId,
+                        UserId = userId
+                    }, _options, _backgroundExtraction, _logger, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

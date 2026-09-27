@@ -142,6 +142,44 @@ public sealed class ExtractionOptions
     public bool LinkFactsToEntities { get; set; }
 
     /// <summary>
+    /// Store a fact's subject and object by the RESOLVED entity's name (dark, default false). Extraction
+    /// writes what was said, so "Tomás | moved to | analytics team" and "Tomás Silva | moved to | analytics
+    /// team" were two facts about one person; with this on both are stored as the second, and MERGE keeps
+    /// one. The wording used is kept as <c>subject_surface</c> / <c>object_surface</c> in the fact's metadata.
+    /// Names that resolved to no entity (for example "user") are kept as written.
+    /// </summary>
+    public bool CanonicalFactSubjects { get; set; }
+
+    /// <summary>
+    /// I-5 (default true since 2026-09-27): what the user says about themselves is stored under their name. The
+    /// extractor calls the speaker "user", so "user | works_at | Northwind" and "Dana | works_at |
+    /// Northwind" were two facts about one person, and the profile listed both. On, a fact whose subject
+    /// or object is "user" (or "I", "me") is stored under the name the user gave: from a
+    /// <c>user | is named | &lt;name&gt;</c> fact in the same extraction, else the owner's stored one (the
+    /// latest). Until a name is known nothing changes. The naming fact itself keeps "user", so it can be
+    /// found again; the words used are kept as <c>subject_surface</c> / <c>object_surface</c>. Combined
+    /// with <see cref="CanonicalFactSubjects"/> the name resolves further, to the known person's full
+    /// name. Ask the extractor for the naming fact with <c>LlmExtractionOptions.CaptureUserName</c>.
+    /// </summary>
+    public bool ResolveUserToName { get; set; } = true;
+
+    /// <summary>
+    /// Merge near-identical facts produced by ONE extraction (dark, default false). A single message
+    /// produced "moved to | analytics team" and "moved to | analytics", and "requested help with" next to
+    /// "needs help with": same fact, two phrasings, two nodes. On, a fact whose vector is at least
+    /// <see cref="WithinExtractionDuplicateThreshold"/> similar to another fact of the same extraction is
+    /// dropped in favour of the more confident one. Facts from different extractions are never merged here.
+    /// </summary>
+    public bool DeduplicateWithinExtraction { get; set; }
+
+    /// <summary>
+    /// Cosine similarity at which two facts of one extraction count as the same (default 0.93). Measured
+    /// with bge-m3: duplicate phrasings scored 0.912–0.996, the closest distinct pair ("is mentor of" /
+    /// "is manager of" the same person) 0.879; 0.93 merges the clear duplicates with a 0.05 margin.
+    /// </summary>
+    public double WithinExtractionDuplicateThreshold { get; set; } = 0.93;
+
+    /// <summary>
     /// Skips the extraction call entirely for turns that cannot carry a fact — greetings, thanks,
     /// bare acknowledgement (E4).
     /// </summary>
@@ -170,6 +208,20 @@ public sealed class ExtractionOptions
     /// </para>
     /// </remarks>
     public bool SkipUninformativeTurns { get; set; }
+
+    /// <summary>
+    /// Skips the extraction call for a turn that is only a plain question (H-2): every sentence ends in a
+    /// question mark and nothing in it could be a new fact — no digits, no time words (“next week”, “in
+    /// October”) and no names (capitalised words other than the first and “I”). “Where does my brother
+    /// live?” is skipped; “What does Dana do?” and “Can you help with my trip next week?” are still extracted.
+    /// </summary>
+    /// <remarks>
+    /// Measured: with <c>IgnoreQuestions</c> the model returns nothing for such a turn, yet the call cost
+    /// 1.0–1.1 s and ≈450 prompt tokens per question. Precision over recall, as for
+    /// <see cref="SkipUninformativeTurns"/>: anything the rule cannot rule out is extracted. Off by default:
+    /// it changes which turns reach the model.
+    /// </remarks>
+    public bool SkipPlainQuestions { get; set; }
 
     /// <summary>
     /// How many earlier turns to hand the extractors as read-only context (E2). <c>0</c> — the
@@ -231,6 +283,54 @@ public sealed class EntityResolutionOptions
     public double FuzzyMatchThreshold { get; set; } = 0.85;
     /// <summary>Minimum cosine similarity for a semantic match to be considered.</summary>
     public double SemanticMatchThreshold { get; set; } = 0.8;
+
+    /// <summary>
+    /// Resolve a partial name to the <b>one</b> known entity whose name contains it as whole words,
+    /// or is contained by it: "Priya" → "Priya Nair", "Priya Nair" → "Priya". Off by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A first name alone never reaches the full name through the other matchers: it is not equal,
+    /// its token-sort ratio is far below <see cref="FuzzyMatchThreshold"/> ("Priya" vs "Priya Nair"
+    /// scores 67), and a one-word embedding rarely clears <see cref="SemanticMatchThreshold"/>. So every
+    /// conversation that says "Priya" after introducing "Priya Nair" created a second person.
+    /// </para>
+    /// <para>
+    /// <b>Ambiguity is never guessed.</b> When two or more same-type entities qualify ("Priya" with
+    /// both "Priya Nair" and "Priya Shah" known) the matcher declines and records a
+    /// <c>memory.resolve.partial_name_ambiguous</c> activity event, so the host can ask which one
+    /// was meant instead of the store silently attaching facts to the wrong person.
+    /// </para>
+    /// <para>
+    /// Applies only to <see cref="PartialNameMatchTypes"/> (people by default): for organizations
+    /// "Microsoft" and "Microsoft Research" are different entities, which a word-subset rule cannot tell.
+    /// </para>
+    /// </remarks>
+    public bool EnablePartialNameMatch { get; set; }
+
+    /// <summary>Entity types partial-name matching applies to (case-insensitive). Default: <c>PERSON</c>.</summary>
+    public IList<string> PartialNameMatchTypes { get; set; } = new List<string> { "PERSON" };
+
+    /// <summary>
+    /// Confidence reported for a unique partial-name match. The default, 0.9, sits in the SAME_AS band
+    /// (between <see cref="ExtractionOptions.SameAsThreshold"/> and
+    /// <see cref="ExtractionOptions.AutoMergeThreshold"/>): the mention resolves to the existing entity
+    /// without rewriting its aliases or embedding.
+    /// </summary>
+    public double PartialNameMatchConfidence { get; set; } = 0.9;
+
+    /// <summary>
+    /// Resolution candidates without vectors, and the semantic stage through the entity vector index
+    /// (dark, default false). By default every live entity of the mention's type is loaded WITH its
+    /// vector on every extraction: measured, an owner with 5,000 people cost 666–804 ms for that read
+    /// and 0.8–1.2 s per resolution, growing linearly. On: the string matchers get ids, names and
+    /// aliases only, the semantic matcher gets the index's top <see cref="SemanticCandidateLimit"/>
+    /// most similar entities, and whatever a string matcher resolves to is read back in full.
+    /// </summary>
+    public bool IndexedCandidates { get; set; }
+
+    /// <summary>How many index neighbours the semantic stage considers when <see cref="IndexedCandidates"/> is on.</summary>
+    public int SemanticCandidateLimit { get; set; } = 20;
 }
 
 /// <summary>Controls validation rules applied to extracted entity candidates.</summary>

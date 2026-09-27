@@ -40,6 +40,7 @@ public class Neo4jMemoryContextProvider : AIContextProvider
     private readonly RecallOptions _recallOptions;
     private readonly ContextFormatOptions _formatOptions;
     private readonly AgentFrameworkOptions _agentOptions;
+    private readonly IBackgroundExtraction? _backgroundExtraction;
     private readonly IMemoryStoreContext? _storeContext;
     private readonly IWritableMemoryOwnerContext? _ownerContext;
     private readonly MemoryToolFactory? _toolFactory;
@@ -47,6 +48,28 @@ public class Neo4jMemoryContextProvider : AIContextProvider
     private readonly IMemoryContextAdmissionPolicy _admissionPolicy;
     private readonly ILogger<Neo4jMemoryContextProvider> _logger;
 
+    /// <summary>The 1.5.0 constructor, kept so assemblies compiled against it still load (an added
+    /// optional parameter is a binary break). New code uses the full constructor.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Neo4jMemoryContextProvider(
+        IMemoryService memoryService,
+        IEmbeddingOrchestrator embeddingOrchestrator,
+        IClock clock,
+        IIdGenerator idGenerator,
+        IOptions<MemoryOptions> memoryOptions,
+        IOptions<ContextFormatOptions> formatOptions,
+        IOptions<AgentFrameworkOptions> agentOptions,
+        ILogger<Neo4jMemoryContextProvider> logger,
+        IMemoryStoreContext? storeContext,
+        IWritableMemoryOwnerContext? ownerContext,
+        MemoryToolFactory? toolFactory,
+        IAutomaticRecallPolicy? recallPolicy,
+        IMemoryContextAdmissionPolicy? admissionPolicy)
+        : this(memoryService, embeddingOrchestrator, clock, idGenerator, memoryOptions, formatOptions, agentOptions, logger, storeContext, ownerContext, toolFactory, recallPolicy, admissionPolicy, backgroundExtraction: null)
+    {
+    }
+
+    [Microsoft.Extensions.DependencyInjection.ActivatorUtilitiesConstructor]
     public Neo4jMemoryContextProvider(
         IMemoryService memoryService,
         IEmbeddingOrchestrator embeddingOrchestrator,
@@ -60,10 +83,11 @@ public class Neo4jMemoryContextProvider : AIContextProvider
         IWritableMemoryOwnerContext? ownerContext = null,
         MemoryToolFactory? toolFactory = null,
         IAutomaticRecallPolicy? recallPolicy = null,
-        IMemoryContextAdmissionPolicy? admissionPolicy = null)
-        // AIContextProvider(IServiceProvider? sp, ILogger? logger, string? stateKey)
-        // All three are passed as null: we supply our own ILogger via constructor injection,
-        // we don't need the base-class IServiceProvider, and StateKey is exposed as our own property.
+        IMemoryContextAdmissionPolicy? admissionPolicy = null,
+        IBackgroundExtraction? backgroundExtraction = null)
+        // AIContextProvider(provideInputMessageFilter, storeInputRequestMessageFilter, storeInputResponseMessageFilter):
+        // null keeps MAF's defaults: ProvideAIContextAsync sees only the caller's new messages (hence the full
+        // thread captured in InvokingCoreAsync for the history dedup), and only those are stored.
         : base(null, null, null)
     {
         _memoryService = memoryService ?? throw new ArgumentNullException(nameof(memoryService));
@@ -73,6 +97,7 @@ public class Neo4jMemoryContextProvider : AIContextProvider
         _recallOptions = memoryOptions?.Value.Recall ?? RecallOptions.Default;
         _formatOptions = formatOptions?.Value ?? new ContextFormatOptions();
         _agentOptions = agentOptions?.Value ?? new AgentFrameworkOptions();
+        _backgroundExtraction = backgroundExtraction;
         _storeContext = storeContext;
         _ownerContext = ownerContext;
         _toolFactory = toolFactory;
@@ -120,17 +145,100 @@ public class Neo4jMemoryContextProvider : AIContextProvider
     /// </remarks>
     protected ContextFormatOptions FormatOptions => _formatOptions;
 
+    // The whole request as the agent will send it (history, other providers' messages and the caller's
+    // new messages). MAF hands ProvideAIContextAsync only the caller's new messages, so without this the
+    // recalled-history dedup could not see what the session's chat history already carries.
+    // Boxed, and the box emptied after the call: anything that captured the execution context during
+    // recall (a driver callback, a timer, a token registration) then holds an empty box, not the thread.
+    private static readonly AsyncLocal<System.Runtime.CompilerServices.StrongBox<IReadOnlyList<ChatMessage>?>?> s_fullThread = new();
+
+    /// <summary>
+    /// Places recalled conversation turns where conversation belongs: before the live thread, in the order
+    /// they happened (see <see cref="RecalledTurns"/>). MAF appends a provider's messages after the request,
+    /// so returned as-is they came after the user's new message, and the model answered the last (old) user
+    /// turn it read.
+    /// </summary>
+    protected override async ValueTask<AIContext> InvokingCoreAsync(
+        InvokingContext context,
+        CancellationToken cancellationToken = default)
+    {
+        var request = context.AIContext;
+        var thread = request?.Messages is null ? null
+            : request.Messages as IReadOnlyList<ChatMessage> ?? request.Messages.ToList();
+        // The caller's context is not modified: the base gets its own copy with the materialised thread.
+        // MAAI001: the constructor is marked for evaluation; MAF's own base class builds the same object the
+        // same way (InvokingCoreAsync's filtered context), so it moves with the base if it ever changes.
+#pragma warning disable MAAI001
+        var own = request is null ? context
+            : new InvokingContext(context.Agent, context.Session,
+                new AIContext { Instructions = request.Instructions, Messages = thread, Tools = request.Tools });
+#pragma warning restore MAAI001
+        var box = new System.Runtime.CompilerServices.StrongBox<IReadOnlyList<ChatMessage>?>(thread);
+        s_fullThread.Value = box;
+        AIContext merged;
+        try
+        {
+            merged = await base.InvokingCoreAsync(own, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            box.Value = null;
+            s_fullThread.Value = null;
+        }
+        return RecalledTurns.Place(merged, GetType().FullName!, _agentOptions.RecalledMemoryBeforeQuestion);
+    }
+
     protected override async ValueTask<AIContext> ProvideAIContextAsync(
         InvokingContext context,
         CancellationToken cancellationToken = default)
     {
         var messages = context.AIContext?.Messages ?? Enumerable.Empty<ChatMessage>();
+        // Before anything stores it: the caller's message gets the one id both providers will store it
+        // under (MafTypeMapper.EnsureProviderMessageId), so extraction's provenance resolves.
+        foreach (var message in messages)
+        {
+            if (message.Role == ChatRole.User && !string.IsNullOrWhiteSpace(message.Text))
+                MafTypeMapper.EnsureProviderMessageId(message);
+        }
         var ids = ExtractIds(context.Session, context.Agent);
         using var storeScope = ApplyStoreContext(ids.applicationId);
-        return await BuildContextAsync(
-                messages, ids.sessionId, ids.conversationId, cancellationToken, ids.userId,
-                ReadDeltaCheckpoint(context.Session), context.Session)
-            .ConfigureAwait(false);
+        // The PRE hook as one span: the parent of routing, recall and composition, tagged with who and
+        // which conversation (owner and store only as whether they applied), so a trace groups by session and turn.
+        using var hook = AgentMemoryDiagnostics.Source.StartActivity(MemoryTelemetry.RecallHookSpan);
+        TagIdentity(hook, ids.sessionId, ids.conversationId, ids.userId, appScoped: storeScope is not null);
+        try
+        {
+            var waited = await TurnExtraction.WaitForPendingAsync(
+                _backgroundExtraction, _agentOptions, ids.userId, ids.sessionId, cancellationToken).ConfigureAwait(false);
+            if (waited > TimeSpan.Zero)
+                hook?.SetTag("memory.recall.waited_for_extraction_ms", Math.Round(waited.TotalMilliseconds, 1));
+            var result = await BuildContextAsync(
+                    messages, ids.sessionId, ids.conversationId, cancellationToken, ids.userId,
+                    ReadDeltaCheckpoint(context.Session), context.Session)
+                .ConfigureAwait(false);
+            hook?.SetTag(MemoryTelemetry.ContextItems, result.Messages?.Count() ?? 0);
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            MemoryTelemetry.RecordException(hook, ex);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Tags a hook span with the turn's session and conversation. Owner and application ids are tenant
+    /// data, so only whether the turn was scoped to one is recorded (<paramref name="appScoped"/>: whether
+    /// the turn was actually routed to an application store, not merely carried an application id).
+    /// </summary>
+    private static void TagIdentity(
+        System.Diagnostics.Activity? span, string sessionId, string conversationId, string? userId, bool appScoped)
+    {
+        if (span is null) return;
+        span.SetTag(MemoryTelemetry.SessionId, MemoryTelemetry.BaggageSessionId() ?? sessionId);
+        span.SetTag(MemoryTelemetry.ConversationId, conversationId);
+        span.SetTag(MemoryTelemetry.OwnerScoped, userId is not null);
+        span.SetTag(MemoryTelemetry.AppScoped, appScoped);
     }
 
     /// <summary>
@@ -306,17 +414,28 @@ public class Neo4jMemoryContextProvider : AIContextProvider
             // ConfiguredAutomaticRecallPolicy always returns Categories=All + Intent=null, which
             // ResolveEffectiveOptions below turns into a complete no-op -- so the pre-#88 behavior is
             // preserved exactly unless a host opts into a different policy.
-            var decision = await _recallPolicy
-                .DecideAsync(
-                    new AutomaticRecallContext
-                    {
-                        Messages = userMessages,
-                        SessionId = sessionId,
-                        ConversationId = conversationId,
-                        UserId = userId
-                    },
-                    cancellationToken)
-                .ConfigureAwait(false);
+            AutomaticRecallDecision decision;
+            using (var route = AgentMemoryDiagnostics.Source.StartActivity(MemoryTelemetry.RouteSpan))
+            {
+                decision = await _recallPolicy
+                    .DecideAsync(
+                        new AutomaticRecallContext
+                        {
+                            Messages = userMessages,
+                            SessionId = sessionId,
+                            ConversationId = conversationId,
+                            UserId = userId
+                        },
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (route is not null)
+                {
+                    route.SetTag(MemoryTelemetry.RoutePolicy, _recallPolicy.GetType().Name);
+                    route.SetTag(MemoryTelemetry.RouteShouldRecall, decision.ShouldRecall);
+                    route.SetTag(MemoryTelemetry.RouteCategories, decision.Categories.ToString());
+                    if (decision.Intent is { } intent) route.SetTag(MemoryTelemetry.RouteIntent, intent.ToString());
+                }
+            }
 
             _logger.LogDebug(
                 "Automatic recall decision for session {SessionId}: policy={Policy} recall={ShouldRecall} " +
@@ -383,13 +502,35 @@ public class Neo4jMemoryContextProvider : AIContextProvider
                 return BuildResult(null, deltaMessage);
             }
 
+            // What routing decided AFTER the policy: the temporal as-of the query resolved to, and whether
+            // the fan-out planner fired and which rules. Tagged on the enclosing recall hook span (T1.3).
+            if (System.Diagnostics.Activity.Current is { OperationName: MemoryTelemetry.RecallHookSpan } hookSpan)
+            {
+                if (recallResult.Context.ResolvedTemporalAsOf is { } asOf)
+                    hookSpan.SetTag(MemoryTelemetry.RouteTemporalAsOf, asOf.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+                if (recallResult.Context.FanOutReport is { } fanOut)
+                {
+                    hookSpan.SetTag(MemoryTelemetry.RouteFanOutFired, fanOut.GateFired);
+                    if (fanOut.FiredRules.Count > 0)
+                        hookSpan.SetTag(MemoryTelemetry.RouteFanOutRules, string.Join(",", fanOut.FiredRules));
+                    hookSpan.SetTag(MemoryTelemetry.RouteFanOutLegs, fanOut.SubQueries.Count);
+                }
+            }
+
             // 2.5. The host is already sending the live thread; recall returns the same recent turns
             // from storage, so without this the model sees them twice and pays for both. Passed here
             // rather than filtered afterwards because the mapper drops duplicates BEFORE applying
             // MaxChatHistoryMessages -- so the same budget carries that many genuinely new messages.
-            var contextMessages = MafTypeMapper.ToContextMessages(
-                recallResult.Context, _formatOptions, _admissionPolicy, _logger,
-                _agentOptions.DeduplicateRecalledHistory ? liveThread : null);
+            // Composition as its own span: admission, trust labelling, dedup and formatting are where
+            // recalled items can be dropped before the model ever sees them (G9).
+            IReadOnlyList<ChatMessage> contextMessages;
+            using (var compose = AgentMemoryDiagnostics.Source.StartActivity(MemoryTelemetry.ComposeSpan))
+            {
+                contextMessages = MafTypeMapper.ToContextMessages(
+                    recallResult.Context, _formatOptions, _admissionPolicy, _logger,
+                    _agentOptions.DeduplicateRecalledHistory ? s_fullThread.Value?.Value ?? liveThread : null);
+                compose?.SetTag(MemoryTelemetry.ContextItems, contextMessages.Count);
+            }
 
             if (contextMessages.Count == 0)
                 return BuildResult(null, deltaMessage);
@@ -561,7 +702,9 @@ public class Neo4jMemoryContextProvider : AIContextProvider
             Intent = decision.Intent ?? _recallOptions.Intent
         };
 
-        return effective with { Scope = null };
+        // H-4: the formatter drops reasoning traces unless IncludeReasoningTraces is on, so searching them
+        // was a vector query per turn whose result was thrown away (measured ≈35 ms each turn).
+        return effective with { Scope = null, MaxTraces = _formatOptions.IncludeReasoningTraces ? effective.MaxTraces : 0 };
     }
 
     /// <summary>
@@ -582,6 +725,9 @@ public class Neo4jMemoryContextProvider : AIContextProvider
         var responseMessages = context.ResponseMessages ?? Enumerable.Empty<ChatMessage>();
         var ids = ExtractIds(context.Session, context.Agent);
         using var storeScope = ApplyStoreContext(ids.applicationId);
+        using var hook = AgentMemoryDiagnostics.Source.StartActivity(MemoryTelemetry.IngestHookSpan);
+        TagIdentity(hook, ids.sessionId, ids.conversationId, ids.userId, appScoped: storeScope is not null);
+        hook?.SetTag(MemoryTelemetry.IngestMessages, requestMessages.Count() + responseMessages.Count());
 
         await PerformStoreAsync(requestMessages, responseMessages, ids.sessionId, ids.conversationId, cancellationToken, ids.userId)
             .ConfigureAwait(false);
@@ -603,57 +749,36 @@ public class Neo4jMemoryContextProvider : AIContextProvider
         using var ownerScope = _ownerContext?.BeginOwnerScope(userId);
         try
         {
-            // Response messages are persisted as new :Message nodes, as before. Request messages are
-            // deliberately NOT persisted here (#89): ChatMessage.MessageId (used below for response-side
-            // dedup) is essentially never populated on caller-constructed request messages, so it can't
-            // help there -- request-message persistence ownership intentionally stays solely with
-            // Neo4jChatHistoryProvider. Building transient (never-persisted) Message objects for extraction
-            // only captures what the user said without risking a duplicate node. Filtered to ChatRole.User
-            // -- the same filter recall already applies (BuildContextAsync above) -- so a system prompt or
-            // other non-user content accumulated in RequestMessages doesn't get minted into spurious
-            // entities/facts/preferences every turn.
-            var transientRequestMessages = requestMessages
-                .Where(msg => msg.Role == ChatRole.User && !string.IsNullOrWhiteSpace(msg.Text))
-                .Select(msg => MafTypeMapper.ToInternalMessage(msg, sessionId, conversationId, _clock, _idGenerator))
-                .ToList();
+            // Only user-role request content: a system prompt or other non-user content in RequestMessages
+            // must not be minted into spurious entities/facts/preferences every turn.
+            // The user's own words are stored here, under the message's one shared id: extraction then
+            // points at a :Message that exists, so every EXTRACTED_FROM edge and source_message_ids entry
+            // resolves. Neo4jChatHistoryProvider stores the same message under the same id and the store
+            // MERGEs on it, so running both still leaves one node per message (#89's concern).
+            var storedRequestMessages = new List<Message>();
+            foreach (var msg in requestMessages.Where(msg => msg.Role == ChatRole.User && !string.IsNullOrWhiteSpace(msg.Text)))
+            {
+                storedRequestMessages.Add(await _memoryService.AddMessageWithIdAsync(
+                    sessionId, conversationId, "user", msg.Text, MafTypeMapper.EnsureProviderMessageId(msg),
+                    cancellationToken: cancellationToken).ConfigureAwait(false));
+            }
 
             var storedMessages = await StoreResponseMessagesAsync(
                 responseMessages, sessionId, conversationId, cancellationToken).ConfigureAwait(false);
 
-            // Extraction sees the complete turn (#89): a fact or preference the user states in their
-            // request is now captured even if the assistant never repeats it back. Because
-            // transientRequestMessages were never persisted as :Message nodes above, provenance for
-            // anything extracted from them is incomplete: the EXTRACTED_FROM edge silently fails to
-            // attach (the MATCH in PersistenceStage's linking Cypher finds no such node), AND the
-            // extracted node's own source_message_ids property will still list the transient (never
-            // persisted) message id, i.e. a dangling reference, not just a missing edge. The extracted
-            // fact/preference itself is still created and recallable correctly; only its link back to the
-            // literal source message is best-effort, not guaranteed, unless another component also
-            // persisted that exact message.
-            var turnMessages = transientRequestMessages.Concat(storedMessages).ToList();
+            // Extraction sees the complete turn (#89): what the user said, as the :Message stored above,
+            // so provenance resolves; the reply too unless ExtractFromUserMessagesOnly.
+            var turnMessages = storedRequestMessages.Concat(storedMessages).ToList();
             if (_agentOptions.AutoExtractOnPersist && turnMessages.Count > 0)
             {
-                using var extractSpan = AgentMemoryDiagnostics.Source.StartActivity("memory.store.extract");
-                extractSpan?.SetTag("memory.extract.source_messages", turnMessages.Count);
-                try
-                {
-                    await _memoryService.ExtractAndPersistAsync(
-                        new ExtractionRequest
-                        {
-                            Messages = turnMessages,
-                            SessionId = sessionId,
-                            UserId = userId
-                        }, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "Extraction failed for session {SessionId}; messages were persisted.", sessionId);
-                }
+                await TurnExtraction.ExtractAsync(
+                    _memoryService,
+                    new ExtractionRequest
+                    {
+                        Messages = turnMessages,
+                        SessionId = sessionId,
+                        UserId = userId
+                    }, _agentOptions, _backgroundExtraction, _logger, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -662,6 +787,7 @@ public class Neo4jMemoryContextProvider : AIContextProvider
         }
         catch (Exception ex)
         {
+            MemoryTelemetry.RecordException(System.Diagnostics.Activity.Current, ex);
             _logger.LogWarning(ex,
                 "Failed to persist messages after run for session {SessionId}.", sessionId);
         }

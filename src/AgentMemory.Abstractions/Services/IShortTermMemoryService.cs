@@ -43,9 +43,10 @@ public interface IShortTermMemoryService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Gets ALL messages for a session in chronological (oldest-first) order, with no cap. Intended for
+    /// Gets ALL live messages for a session in chronological (oldest-first) order, with no cap. Intended for
     /// whole-session operations such as retroactive extraction, which must see every message — unlike
-    /// <see cref="GetRecentMessagesAsync"/>, which is intentionally capped.
+    /// <see cref="GetRecentMessagesAsync"/>, which is intentionally capped. Forgotten messages
+    /// (<see cref="InvalidateMessageAsync"/>) are skipped, so a re-extraction never re-learns them.
     /// </summary>
     Task<IReadOnlyList<Message>> GetAllSessionMessagesAsync(
         string sessionId,
@@ -88,4 +89,13 @@ public interface IShortTermMemoryService
         DateTimeOffset asOf,
         int limit = 10,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Forgets a message: it is no longer recalled (recent messages, message search) but is kept for history and
+    /// as-of reads. For “forget this person”: forgetting their facts and entity is not enough while the words
+    /// that named them are still recalled. See <see cref="AgentMemory.Abstractions.Repositories.IMessageRepository.InvalidateAsync"/>.
+    /// </summary>
+    Task<bool> InvalidateMessageAsync(string messageId, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException(
+            "This IShortTermMemoryService implementation cannot forget a message; recall would keep returning it.");
 }

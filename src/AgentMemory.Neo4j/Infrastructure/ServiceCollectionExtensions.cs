@@ -1,6 +1,9 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
+using AgentMemory.Neo4j.Schema.Extensions;
+using AgentMemory.Abstractions.Options;
+using Microsoft.Extensions.Options;
 using Neo4j.Driver;
 using AgentMemory.Abstractions.Repositories;
 using AgentMemory.Core.Extraction;
@@ -35,6 +38,16 @@ public static class ServiceCollectionExtensions
             .Validate(o => o.EmbeddingDimensions > 0, "Neo4j EmbeddingDimensions must be positive.")
             .Validate(o => o.ConnectionAcquisitionTimeout > TimeSpan.Zero, "Neo4j ConnectionAcquisitionTimeout must be positive.")
             .ValidateOnStart();
+
+        // The working-memory tier (on by default) writes one :User node per owner, and its schema
+        // extension carries the UNIQUE constraint that makes that MERGE race-safe and indexed. Derived
+        // from the tier's own switch, so the two cannot disagree: a tier without its schema gets label
+        // scans and, under concurrent first writes, duplicate :User nodes.
+        services.AddOptions<Neo4jOptions>().PostConfigure<IOptions<MemoryOptions>>((neo4j, memory) =>
+        {
+            if (memory.Value.WorkingMemory.Enabled)
+                neo4j.Extensions.Add(WorkingMemorySchemaExtension.ExtensionId);
+        });
 
         // Infrastructure
         services.TryAddSingleton<INeo4jDriverFactory, Neo4jDriverFactory>();
@@ -72,6 +85,8 @@ public static class ServiceCollectionExtensions
         // Long-term memory repositories
         services.TryAddTransient<IEntityRepository, Neo4jEntityRepository>();
         services.TryAddTransient<IFactRepository, Neo4jFactRepository>();
+        // G-14: owner row counts for owner-first recall, shared across the transient repositories.
+        services.TryAddSingleton<OwnerRowCounts>();
         services.TryAddTransient<IPreferenceRepository, Neo4jPreferenceRepository>();
         // S1. Registered beside the other repositories rather than behind a feature flag: an
         // unregistered store would make EntitySummaryService unresolvable, so the option that
@@ -118,6 +133,7 @@ public static class ServiceCollectionExtensions
         // 30.4. Registered unconditionally and self-gated on WorkingMemoryOptions.Enabled -- the
         // reranker pattern, so IOptions reconfiguration works.
         services.TryAddScoped<IWorkingMemoryService, Services.Neo4jWorkingMemoryService>();
+        services.TryAddSingleton<Services.WorkingMemoryRebuildBackoff>();
 
         // 30.4b. MergeEntitiesAsync's rebuild seam is hooked INSIDE Neo4jEntityRepository, not by
         // decorating IEntityRepository here. A decorator implementing only IEntityRepository strips

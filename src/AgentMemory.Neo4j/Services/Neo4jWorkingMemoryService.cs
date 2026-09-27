@@ -34,14 +34,17 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
     private readonly IIdGenerator _ids;
     private readonly WorkingMemoryOptions _options;
     private readonly ILogger<Neo4jWorkingMemoryService> _logger;
+    private readonly WorkingMemoryRebuildBackoff? _backoff;
 
     public Neo4jWorkingMemoryService(
         INeo4jTransactionRunner tx,
         IClock clock,
         IIdGenerator ids,
         IOptions<MemoryOptions> options,
-        ILogger<Neo4jWorkingMemoryService> logger)
+        ILogger<Neo4jWorkingMemoryService> logger,
+        WorkingMemoryRebuildBackoff? backoff = null)
     {
+        _backoff = backoff;
         ArgumentNullException.ThrowIfNull(options);
         _tx = tx;
         _clock = clock;
@@ -58,7 +61,10 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
 
         var now = _clock.UtcNow;
         var text = await ComposeAsync(ownerId, now, cancellationToken).ConfigureAwait(false);
-        var hash = Hash(text);
+        var validUntil = await NextValidityBoundaryAsync(ownerId, now, cancellationToken).ConfigureAwait(false);
+        // The boundary is part of what is stored, so it is part of the hash: a rebuild whose text is
+        // unchanged but whose next boundary moved still writes.
+        var hash = Hash(validUntil is null ? text : $"{text}\n@{validUntil}");
 
         // Hash short-circuit: a rebuild that changes nothing writes nothing, so built_at moves only
         // when the CONTENT moves. Without this, every write burst would churn a transaction and
@@ -85,6 +91,7 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
                 id = _ids.GenerateId(),
                 block = text,
                 hash,
+                validUntil,
                 now = now.ToString("O", CultureInfo.InvariantCulture),
             }).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
@@ -99,26 +106,83 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
     {
         if (ShouldSkip(ownerId)) return null;
 
-        return await _tx.ReadAsync(async runner =>
+        var block = await ReadBlockAsync(ownerId, cancellationToken).ConfigureAwait(false);
+        // A fact in the block expired (or a future one became valid) since it was built, or the block was
+        // cleared: rebuild once and serve the rebuilt block. Rare by construction: at most once per boundary.
+        if (block.ValidUntil is { } boundary && boundary <= _clock.UtcNow)
+        {
+            // A rebuild that just failed for this owner is not retried on every recall: that would be a
+            // failing write and a warning per turn, forever, for as long as the cause lasts.
+            if (_backoff?.IsWaiting(ownerId, _clock.UtcNow) == true)
+                return _options.ClearOnRebuildFailure ? null : block.Block;
+            try
+            {
+                await RebuildAsync(ownerId, cancellationToken).ConfigureAwait(false);
+                block = await ReadBlockAsync(ownerId, cancellationToken).ConfigureAwait(false);
+                _backoff?.Succeeded(ownerId);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                // This is the recall path: a rebuild that cannot write (a read-only connection, a timeout,
+                // a lock) must not fail recall. What is served instead follows ClearOnRebuildFailure, the
+                // same choice the write path makes: nothing rather than a block that may assert an expired
+                // fact, unless the host prefers the stale block.
+                _logger.LogWarning(exception,
+                    "Working-memory rebuild on read failed for owner {Owner}; recall continues without a rebuilt block.",
+                    ownerId);
+                _backoff?.Failed(ownerId, _clock.UtcNow);
+                return _options.ClearOnRebuildFailure ? null : block.Block;
+            }
+        }
+        return block.Block;
+    }
+
+    private async Task<string?> NextValidityBoundaryAsync(string ownerId, DateTimeOffset now, CancellationToken cancellationToken) =>
+        await _tx.ReadAsync(async runner =>
+        {
+            // Only facts that can be in the block: a boundary of one that cannot would rebuild for nothing.
+            var cursor = await runner.RunAsync(WorkingMemoryQueries.NextValidityBoundary, new
+            {
+                ownerId,
+                minMentions = _options.MinFactMentionCount,
+                now = now.ToString("O", CultureInfo.InvariantCulture),
+            }).ConfigureAwait(false);
+            var records = await cursor.ToListAsync().ConfigureAwait(false);
+            return records.Count == 0 || records[0]["boundary"] is null
+                ? null
+                : Neo4jDateTimeHelper.ReadNullableDateTimeOffset(records[0]["boundary"])?.ToString("O", CultureInfo.InvariantCulture);
+        }, cancellationToken).ConfigureAwait(false);
+
+    private async Task<(WorkingMemoryBlock? Block, DateTimeOffset? ValidUntil)> ReadBlockAsync(
+        string ownerId, CancellationToken cancellationToken) =>
+        await _tx.ReadAsync(async runner =>
         {
             var cursor = await runner.RunAsync(
                 WorkingMemoryQueries.GetBlock, new { ownerId }).ConfigureAwait(false);
             var records = await cursor.ToListAsync().ConfigureAwait(false);
-            if (records.Count == 0) return null;
+            if (records.Count == 0) return ((WorkingMemoryBlock?)null, (DateTimeOffset?)null);
 
+            var validUntil = records[0].Keys.Contains("validUntil")
+                ? Neo4jDateTimeHelper.ReadNullableDateTimeOffset(records[0]["validUntil"])
+                : null;
+            // No text is no block, but the boundary still counts: a block that is empty today because its
+            // only fact starts on Monday must be rebuilt on Monday.
             var text = records[0]["block"].As<string?>();
-            if (string.IsNullOrEmpty(text)) return null;
+            if (string.IsNullOrEmpty(text)) return (null, validUntil);
 
-            return new WorkingMemoryBlock
+            return (new WorkingMemoryBlock
             {
                 OwnerId = ownerId,
                 Text = text,
                 BuiltAtUtc = Neo4jDateTimeHelper.ReadNullableDateTimeOffset(records[0]["builtAt"])
                              ?? _clock.UtcNow,
                 ContentHash = records[0]["hash"].As<string?>() ?? Hash(text),
-            };
+            }, validUntil);
         }, cancellationToken).ConfigureAwait(false);
-    }
 
     /// <inheritdoc/>
     public async Task ClearAsync(string ownerId, CancellationToken cancellationToken = default)
@@ -173,7 +237,8 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
                 ownerId,
                 now = stamp,
                 minMentions = _options.MinFactMentionCount,
-                limit = _options.MaxStableFacts,
+                byMentions = Math.Max(0, _options.MaxStableFacts - _options.RecentStableFactSlots),
+                recent = Math.Min(_options.RecentStableFactSlots, _options.MaxStableFacts),
             }).ConfigureAwait(false);
             var records = await cursor.ToListAsync().ConfigureAwait(false);
             return records

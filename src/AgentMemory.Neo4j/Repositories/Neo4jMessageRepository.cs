@@ -11,8 +11,8 @@ namespace AgentMemory.Neo4j.Repositories;
 
 internal sealed class Neo4jMessageRepository : IMessageRepository
 {
-    // Metadata-only filters run after the global vector candidate pool, so those searches must
-    // over-fetch before filtering. Session-scoped searches use an exact in-session query instead.
+    // Unscoped searches filter after the global vector candidate pool (metadata filters, forgotten messages), so
+    // they over-fetch and then take `limit`. Session-scoped searches use an exact in-session query instead.
     private const int ScopedOverFetchFactor = 5;
     private const int ScopedOverFetchFloor = 50;
     private readonly INeo4jTransactionRunner _tx;
@@ -264,7 +264,10 @@ internal sealed class Neo4jMessageRepository : IMessageRepository
 
         var (filterClause, filterParams) = MetadataFilterBuilder.Build(metadataFilters, nodeAlias: "node");
         var hasMetadataFilter = !string.IsNullOrWhiteSpace(filterClause);
-        var topK = sessionId is null && hasMetadataFilter
+        // Unscoped, the index answers first and filters apply after: metadata filters, and forgotten messages
+        // (G-30), which rank first for a question about what was forgotten. Over-fetch so the result is not short
+        // (unless more than topK - limit forgotten messages outrank every live one).
+        var topK = sessionId is null
             ? Math.Max(limit * ScopedOverFetchFactor, limit + ScopedOverFetchFloor)
             : limit;
         var cypher = MessageQueries.SearchByVector(sessionId is not null, filterClause, topK);
@@ -314,6 +317,19 @@ internal sealed class Neo4jMessageRepository : IMessageRepository
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<bool> InvalidateAsync(string messageId, CancellationToken cancellationToken = default)
+    {
+        _logger.LogDebug("Invalidating message {Id}", messageId);
+
+        return await _tx.WriteAsync(async runner =>
+        {
+            var cursor = await runner.RunAsync(MessageQueries.Invalidate,
+                new { id = messageId, now = DateTimeOffset.UtcNow.ToString("O") }).ConfigureAwait(false);
+            var records = await cursor.ToListAsync().ConfigureAwait(false);
+            return records.Count > 0 && records[0]["invalidated"].As<bool>();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<Message>> GetRecentBySessionAsOfAsync(
         string sessionId,
         DateTimeOffset asOf,
@@ -351,6 +367,9 @@ internal sealed class Neo4jMessageRepository : IMessageRepository
             Role           = properties["role"].As<string>(),
             Content        = properties["content"].As<string>(),
             TimestampUtc   = Neo4jDateTimeHelper.ReadDateTimeOffset(properties["timestamp"]),
+            InvalidatedAtUtc = properties.TryGetValue("invalidated_at", out var forgotten) && forgotten is not null
+                                ? Neo4jDateTimeHelper.ReadDateTimeOffset(forgotten)
+                                : null,
             Embedding      = embedding,
             ToolCallIds    = properties.TryGetValue("tool_call_ids", out var tc)
                                 ? tc.As<IList<object>>().Select(v => v.ToString()!).ToList()

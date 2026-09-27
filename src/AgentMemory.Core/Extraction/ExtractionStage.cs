@@ -50,6 +50,9 @@ internal sealed class ExtractionStage : IExtractionStage
     public IDisposable? BeginResolutionBatch() =>
         (_entityResolver as IExtractionEntityResolver)?.BeginBatch();
 
+    public IDisposable? BeginOrJoinResolutionBatch() =>
+        (_entityResolver as IExtractionEntityResolver)?.BeginOrJoinBatch();
+
     public void InvalidateResolutionBatch() =>
         (_entityResolver as IExtractionEntityResolver)?.InvalidateBatch();
 
@@ -97,9 +100,9 @@ internal sealed class ExtractionStage : IExtractionStage
         // E4. Turns that cannot carry a fact -- "ok, thanks!" -- are not worth a completion. Only on
         // the paying path: when preExtracted is non-null the caller has already spent the call, and
         // gating there would discard a result that has been paid for rather than avoid the cost.
-        if (_options.SkipUninformativeTurns
+        if ((_options.SkipUninformativeTurns || _options.SkipPlainQuestions)
             && preExtracted is null
-            && !ExtractionNoveltyGate.IsWorthExtracting(messages))
+            && !ExtractionNoveltyGate.IsWorthExtracting(messages, _options.SkipUninformativeTurns, _options.SkipPlainQuestions))
         {
             // Logged rather than silent: a gate that quietly drops turns is indistinguishable from an
             // extractor that found nothing, and the saving it claims would be unverifiable.
@@ -201,13 +204,17 @@ internal sealed class ExtractionStage : IExtractionStage
 
         if (_entityResolver is IExtractionEntityResolver batchResolver)
         {
-            var candidateTypes = rawEntities
+            var resolvable = rawEntities
                 .Where(entity =>
                     entity.Confidence >= _options.MinConfidenceThreshold &&
                     EntityValidator.IsValid(entity, _options.Validation))
-                .Select(entity => entity.Type)
                 .ToArray();
-            await batchResolver.PrepareCandidatesAsync(candidateTypes, scope, cancellationToken)
+            await batchResolver.PrepareCandidatesAsync(
+                    resolvable.Select(entity => entity.Type).ToArray(), scope, cancellationToken)
+                .ConfigureAwait(false);
+            // After the candidates: which names need a vector depends on what the string matchers
+            // can already resolve against them.
+            await batchResolver.PrepareNameEmbeddingsAsync(resolvable, scope, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -324,7 +331,12 @@ internal sealed class ExtractionStage : IExtractionStage
                 continue;
             }
 
-            if (!resolvedEntityMap.ContainsKey(extracted.SourceEntity))
+            // I-7: an endpoint that is the user ("user -WORKS_AT-> Fabrikam") is not an extracted entity; with
+            // ResolveUserToName, persistence maps it to the user's person entity, so it is not dropped here.
+            bool IsUserEndpoint(string endpoint, bool source) =>
+                _options.ResolveUserToName && PersistenceStage.UserNames.MeansUserEndpoint(endpoint, source);
+
+            if (!resolvedEntityMap.ContainsKey(extracted.SourceEntity) && !IsUserEndpoint(extracted.SourceEntity, source: true))
             {
                 _logger.LogWarning(
                     "Skipping relationship — source entity '{Source}' not resolved.",
@@ -341,7 +353,7 @@ internal sealed class ExtractionStage : IExtractionStage
                 continue;
             }
 
-            if (!resolvedEntityMap.ContainsKey(extracted.TargetEntity))
+            if (!resolvedEntityMap.ContainsKey(extracted.TargetEntity) && !IsUserEndpoint(extracted.TargetEntity, source: false))
             {
                 _logger.LogWarning(
                     "Skipping relationship — target entity '{Target}' not resolved.",

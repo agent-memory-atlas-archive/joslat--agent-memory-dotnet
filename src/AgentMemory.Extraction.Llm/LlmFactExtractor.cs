@@ -58,7 +58,8 @@ internal sealed class LlmFactExtractor : ExtractorBase<ExtractedFact>, IFactExtr
         return await _runner.RunAsync(
             (_options.FactExtractionPrompt
                 ?? BuildSystemPrompt(
-                    _options.AssistantContent, _options.TemporalValidity, _options.Provenance))
+                    _options.AssistantContent, _options.TemporalValidity, _options.Provenance, _options.CaptureUserName,
+                    _options.IgnoreQuestions))
                 // Only when context is present: a context-free prompt must stay byte-identical (E2).
                 + (window.HasContext ? ExtractionPromptSemantics.ExtractionContextInstruction : string.Empty),
             "Extract facts from this conversation:",
@@ -106,9 +107,13 @@ internal sealed class LlmFactExtractor : ExtractorBase<ExtractedFact>, IFactExtr
     internal static string BuildSystemPrompt(
         AssistantContentMode assistantContent,
         TemporalValidityMode temporalValidity,
-        ExtractionProvenanceMode provenance) =>
+        ExtractionProvenanceMode provenance,
+        bool captureUserName = false,
+        bool ignoreQuestions = false) =>
         DefaultSystemPrompt
         + ExtractionPromptSemantics.AssistantContentInstruction(assistantContent)
         + ExtractionPromptSemantics.TemporalValidityInstruction(temporalValidity)
-        + ExtractionPromptSemantics.ProvenanceInstruction(provenance);
+        + ExtractionPromptSemantics.ProvenanceInstruction(provenance)
+        + ExtractionPromptSemantics.UserNameInstruction(captureUserName)
+        + ExtractionPromptSemantics.QuestionsInstruction(ignoreQuestions);
 }

@@ -1,7 +1,7 @@
 namespace AgentMemory.Abstractions.Options;
 
 /// <summary>
-/// The working-memory tier: a compiled per-owner profile block, off by default.
+/// The working-memory tier: a compiled per-owner profile block, on by default.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -19,8 +19,14 @@ namespace AgentMemory.Abstractions.Options;
 /// </remarks>
 public sealed class WorkingMemoryOptions
 {
-    /// <summary>Off by default. When false the block is never compiled, never stored, never rendered.</summary>
-    public bool Enabled { get; set; }
+    /// <summary>
+    /// On by default (since 2026-09-26). When false the block is never compiled, never stored, never
+    /// rendered. Measured: a new session asked "what do you know about me?" answered with the user's name,
+    /// job, employer, manager, family, neighbour and preferences with the block (3 of 3 runs) and "a pretty
+    /// thin file" without it (2 of 2), at the same answer time: a generic question's embedding matches few
+    /// stored facts, so similarity recall alone cannot answer it.
+    /// </summary>
+    public bool Enabled { get; set; } = true;
 
     /// <summary>Hard token budget for the rendered block. Estimated as ceil(chars / 4).</summary>
     public int MaxTokens { get; set; } = 300;
@@ -28,14 +34,25 @@ public sealed class WorkingMemoryOptions
     /// <summary>Most stable facts to include.</summary>
     public int MaxStableFacts { get; set; } = 12;
 
+    /// <summary>
+    /// Of <see cref="MaxStableFacts"/>, how many slots go to the most recently learned facts that did not
+    /// win a slot by mentions (default 4). Without them, once every slot holds a fact mentioned twice or
+    /// more, a new job or city (mentioned once) never reaches the block. 0 = slots by mentions only, the
+    /// behaviour before this existed.
+    /// </summary>
+    public int RecentStableFactSlots { get; set; } = 4;
+
     /// <summary>Most active preferences to include.</summary>
     public int MaxActivePreferences { get; set; } = 8;
 
     /// <summary>Most salient entities to include.</summary>
     public int MaxTopEntities { get; set; } = 6;
 
-    /// <summary>How often a fact must have been mentioned to earn a slot.</summary>
-    public int MinFactMentionCount { get; set; } = 2;
+    /// <summary>
+    /// How often a fact must have been mentioned to earn a slot. 1 by default: most facts about a user are
+    /// said once, and at 2 the block of a short relationship held no facts at all.
+    /// </summary>
+    public int MinFactMentionCount { get; set; } = 1;
 
     /// <summary>Confidence floor for a preference to earn a slot.</summary>
     public double MinPreferenceConfidence { get; set; } = 0.5;

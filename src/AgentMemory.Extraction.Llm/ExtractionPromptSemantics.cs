@@ -181,6 +181,47 @@ internal static class ExtractionPromptSemantics
           + "again, while two names left apart can still be joined later."
         : string.Empty;
 
+    /// <summary>
+    /// I-5: asks for the user's own name as a fact, so persistence can store what the user says about
+    /// themselves under that name (<c>ExtractionOptions.ResolveUserToName</c>). Empty when off, so the
+    /// prompt stays byte-for-byte what it was.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Capture, not inference, for the same reason as aliases: only a name the user states. A model
+    /// asked to guess which person in the conversation is the user would bind a sister's name to the
+    /// speaker.
+    /// </para>
+    /// <para>
+    /// Described in words, not as a literal JSON object: each rung has its own fact schema (the
+    /// multi-session rung requires <c>source_session</c> on every fact), and a literal would teach the
+    /// model a fact without it.
+    /// </para>
+    /// <para>
+    /// <b>It only adds.</b> A first wording also told the model to "refer to the person speaking to the
+    /// assistant as user"; on a book passage the model then reasoned "fictional text; no user memory" and
+    /// returned nothing, for 2 of 6 chunks in 3 of 3 runs (measured 2026-09-27). The instruction now says
+    /// that everything else is extracted as before.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// A question states nothing: no memory is made from what is asked, only from what a question states
+    /// outright. Empty when off. Worded as an exception, not a ban, so "can you help with my trip to Seville
+    /// next week?" still records the trip.
+    /// </summary>
+    internal static string QuestionsInstruction(bool ignore) => ignore
+        ? "\nA question asks; it does not state. Do not create entities, facts or relationships from what "
+          + "a turn asks about (\"What do you remember about my brother?\" states nothing), only from what "
+          + "it states outright (\"Can you help with my trip to Seville next week?\" states a trip)."
+        : string.Empty;
+
+    internal static string UserNameInstruction(bool capture) => capture
+        ? "\nIf the user STATES their own name (\"I'm Dana\", \"call me Dee\"), also add a fact whose "
+          + "subject is \"user\", whose predicate is \"is named\" and whose object is the name as they "
+          + "said it, with every other field a fact needs. Never add it for anyone else's name. Everything "
+          + "else is extracted exactly as it would be without this instruction."
+        : string.Empty;
+
     internal static string TemporalValidityInstruction(TemporalValidityMode mode) => mode switch
     {
         TemporalValidityMode.Extract =>

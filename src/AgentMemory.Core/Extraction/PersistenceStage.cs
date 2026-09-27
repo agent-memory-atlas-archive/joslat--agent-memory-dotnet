@@ -137,6 +137,11 @@ internal sealed partial class PersistenceStage : IPersistenceStage
         }
 
         var prepared = await PrepareEmbeddingsAsync(extraction, cancellationToken).ConfigureAwait(false);
+        if (_options.DeduplicateWithinExtraction && prepared.Facts.Count > 1)
+        {
+            var (kept, merged) = WithoutNearDuplicates(prepared.Facts, _options.WithinExtractionDuplicateThreshold);
+            prepared = prepared with { Facts = kept, Outcomes = [.. prepared.Outcomes, .. merged] };
+        }
         if (_options.FailureMode == IngestionFailureMode.FailFast)
         {
             try
@@ -253,6 +258,12 @@ internal sealed partial class PersistenceStage : IPersistenceStage
                     persistedEntityMap.TryAdd(alias, persisted);
             }
 
+            // I-2. A canonical fact names the entity by its resolved name, which may be none of the
+            // strings this extraction produced ("Tomás" resolved to "Tomás Silva"): the name must find
+            // the entity too, or the fact would lose its ABOUT edge. Gated so the default map is unchanged.
+            if (_options.CanonicalFactSubjects && !string.IsNullOrWhiteSpace(persisted.Name))
+                persistedEntityMap.TryAdd(persisted.Name, persisted);
+
             RecordSuccess(outcomes, MemoryItemKind.Entity, name, persisted.EntityId);
 
             foreach (var msgId in ExplicitProvenanceMessageIds(_entityRepository, sourceMessageIds))
@@ -344,10 +355,42 @@ internal sealed partial class PersistenceStage : IPersistenceStage
         var supersessionEligible = 0;
         var supersessionRefusals = 0;
 
+        // I-2. The name a subject or object is stored under: the resolved entity's, when it resolved to one.
+        string CanonicalName(string surface) =>
+            _options.CanonicalFactSubjects && !string.IsNullOrWhiteSpace(surface) &&
+            persistedEntityMap.TryGetValue(surface, out var resolved) && !string.IsNullOrWhiteSpace(resolved.Name)
+                ? resolved.Name
+                : surface;
+
+        // I-5. "user" is the owner: once the user has said their name, what they say about themselves is
+        // stored under it. Read only when this extraction has something to rewrite.
+        var userName = _options.ResolveUserToName && !string.IsNullOrWhiteSpace(ownerId) &&
+                       (prepared.Facts.Any(f => UserNames.MeansUser(f.Item, subject: true) || UserNames.MeansUser(f.Item, subject: false)) ||
+                        extraction.FilteredRelationships.Any(r => UserNames.MeansUserEndpoint(r.SourceEntity, source: true) ||
+                                                                  UserNames.MeansUserEndpoint(r.TargetEntity, source: false)))
+            ? await UserNameAsync(prepared.Facts, ownerId!, cancellationToken).ConfigureAwait(false)
+            : null;
+
+        // The one place a stored subject or object is decided: the fact's preparation and the batch
+        // distinctness guard both call it, so they cannot disagree about which facts become one node.
+        string StoredName(ExtractedFact fact, bool subject)
+        {
+            var surface = subject ? fact.Subject : fact.Object;
+            if (userName is not null && UserNames.MeansUser(fact, subject)) return CanonicalName(userName);
+            // The words that mean the user are never renamed to an entity's name: found live, "user" resolved into
+            // the person "Dana" and canonical subjects stored the naming fact as "Dana | is named | Dana", so the
+            // name could never be found again (it is looked up under "user"). Only the rule above renames them.
+            if (subject && UserNames.IsSelf(surface)) return surface;
+            return CanonicalName(surface);
+        }
+
         async Task<(Fact Item, string SourceKey)?> PrepareFactAsync(PreparedFact preparedFact)
         {
             var extracted = preparedFact.Item;
+            // The source key stays the words as extracted: outcomes are keyed by the input item.
             var factSourceKey = $"{extracted.Subject} {extracted.Predicate} {extracted.Object}";
+            var subject = StoredName(extracted, subject: true);
+            var @object = StoredName(extracted, subject: false);
             try
             {
                 // Trust is monotonic for owner-scoped facts. The pre-fetch deliberately excludes shared
@@ -357,7 +400,7 @@ internal sealed partial class PersistenceStage : IPersistenceStage
                 Fact? existingFact = string.IsNullOrEmpty(ownerId)
                     ? null
                     : await _factRepository.FindByTripleAsync(
-                        extracted.Subject, extracted.Predicate, extracted.Object,
+                        subject, extracted.Predicate, @object,
                         MemoryScope.For(ownerId, includeShared: false), cancellationToken).ConfigureAwait(false);
                 // Per-item refinement before the existing per-batch composition. At defaults SourceRole
                 // is null on every item and this is the identity, so the trust a host sees is byte-for-
@@ -374,13 +417,21 @@ internal sealed partial class PersistenceStage : IPersistenceStage
                 var factMetadata = existingFact is null
                     ? MemoryTrustMetadataExtensions.CreateWithTrustLevel(effectiveFactTrustLevel)
                     : existingFact.Metadata.WithTrustLevel(effectiveFactTrustLevel);
+                if (!string.Equals(subject, extracted.Subject, StringComparison.Ordinal) ||
+                    !string.Equals(@object, extracted.Object, StringComparison.Ordinal))
+                {
+                    var surfaces = new Dictionary<string, object>(factMetadata);
+                    if (!string.Equals(subject, extracted.Subject, StringComparison.Ordinal)) surfaces["subject_surface"] = extracted.Subject;
+                    if (!string.Equals(@object, extracted.Object, StringComparison.Ordinal)) surfaces["object_surface"] = extracted.Object;
+                    factMetadata = surfaces;
+                }
 
                 return (new Fact
                 {
                     FactId = _idGenerator.GenerateId(),
-                    Subject = existingFact?.Subject ?? extracted.Subject,
+                    Subject = existingFact?.Subject ?? subject,
                     Predicate = existingFact?.Predicate ?? extracted.Predicate,
-                    Object = existingFact?.Object ?? extracted.Object,
+                    Object = existingFact?.Object ?? @object,
                     Confidence = extracted.Confidence,
                     ValidFrom = extracted.ValidFrom,
                     ValidUntil = extracted.ValidUntil,
@@ -526,11 +577,24 @@ internal sealed partial class PersistenceStage : IPersistenceStage
             supersessionEligible++;
 
             var scope = string.IsNullOrEmpty(ownerId) ? null : MemoryScope.For(ownerId, includeShared: false);
+            // G-15 review: a write without an owner replaces only owner-less (shared) facts. Read with no scope,
+            // a shared write superseded every tenant's private facts with the same subject and predicate. The
+            // supersede statement itself already refuses to link facts of different owners.
+            var candidates = SharedScopes.OwnedOrShared(ownerId);
             try
             {
                 var losers = await _factRepository.FindSupersededCandidatesAsync(
-                    winner.FactId, winner.Subject, winner.Predicate, winner.Object, scope,
+                    winner.FactId, winner.Subject, winner.Predicate, winner.Object, candidates,
                     cancellationToken).ConfigureAwait(false);
+                // I-5. A fact now stored under the user's name also replaces what was stored before the
+                // name was known, under the words used then ("user | lives in | Lisbon").
+                if (winner.Metadata.TryGetValue("subject_surface", out var surface) && surface is string said &&
+                    UserNames.IsSelf(said))
+                {
+                    losers = [.. losers, .. await _factRepository.FindSupersededCandidatesAsync(
+                        winner.FactId, said, winner.Predicate, winner.Object, candidates,
+                        cancellationToken).ConfigureAwait(false)];
+                }
 
                 foreach (var loser in losers)
                 {
@@ -572,10 +636,19 @@ internal sealed partial class PersistenceStage : IPersistenceStage
         static (string Subject, string Predicate, string Object, string? OwnerId) FactKey(Fact fact) =>
             (fact.Subject, fact.Predicate, fact.Object, fact.OwnerId);
 
-        var distinctExtractedTriples = extraction.FilteredFacts
-            .Select(fact => (fact.Subject, fact.Predicate, fact.Object))
-            .Distinct(FactTripleComparer.OrdinalIgnoreCase)
-            .Count() == extraction.FilteredFacts.Count;
+        // Distinct as STORED: canonical names applied, compared on the storage MERGE key (values by
+        // CanonicalValue, the predicate by Canonical, which folds "_" and "-": "works_at" and "works at"
+        // are one key, exactly as Neo4jFactRepository computes it). Two facts that the
+        // extraction phrased apart but that land on one node ("Tomás | works at | Acme" and "Tomás Silva |
+        // Works at | Acme" under canonical subjects) must take the sequential path, where the second one's
+        // pre-fetch sees the first; batched, the MERGE folds them and the batch replays both (review round 2).
+        var distinctExtractedTriples = prepared.Facts
+            .Select(fact => (
+                MemoryTripleCanonicalizer.CanonicalValue(StoredName(fact.Item, subject: true)),
+                MemoryTripleCanonicalizer.Canonical(fact.Item.Predicate),
+                MemoryTripleCanonicalizer.CanonicalValue(StoredName(fact.Item, subject: false))))
+            .Distinct()
+            .Count() == prepared.Facts.Count;
         var fusedFactRepository = _options.UseCoalescedPersistenceTransactions
             ? _factRepository as IFusedBatchMemoryRepository<Fact> : null;
         var batchFactRepository = _factRepository as IBatchMemoryRepository<Fact>;
@@ -755,13 +828,40 @@ internal sealed partial class PersistenceStage : IPersistenceStage
                 await PersistPreferenceIndividuallyAsync(input.Item, input.SourceKey).ConfigureAwait(false);
         }
         // 4. Persist relationships — resolve entity IDs from the upserted entity map.
+        // I-7. "user" as an endpoint is the user's person entity: the one this extraction wrote under their
+        // name, else the stored one (read once, best-effort). Unknown name or entity: skipped as before.
+        Entity? userEntity = null;
+        var userEntityRead = false;
+        async Task<Entity?> UserEntityAsync()
+        {
+            if (userEntityRead || userName is null) return userEntity;
+            userEntityRead = true;
+            if (persistedEntityMap.TryGetValue(userName, out var inThisExtraction)) return userEntity = inThisExtraction;
+            try
+            {
+                // Live only: a name merged into another person, or invalidated, must not anchor new edges.
+                return userEntity = await _entityRepository.FindLiveByNameAsync(
+                    userName, "PERSON", MemoryScope.For(ownerId!, includeShared: false), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not read the user's entity for owner {Owner}; relationships from \"user\" are skipped.", ownerId);
+                return null;
+            }
+        }
+        async Task<Entity?> EndpointAsync(string name, bool source) =>
+            persistedEntityMap.TryGetValue(name, out var entity) ? entity
+            : UserNames.MeansUserEndpoint(name, source) ? await UserEntityAsync().ConfigureAwait(false)
+            : null;
+
         var relationshipInputs = new List<(Relationship Item, string SourceKey)>(
             extraction.FilteredRelationships.Count);
         foreach (var extracted in extraction.FilteredRelationships)
         {
             var relSourceKey = $"{extracted.SourceEntity}-{extracted.RelationshipType}->{extracted.TargetEntity}";
 
-            if (!persistedEntityMap.TryGetValue(extracted.SourceEntity, out var sourceEntity))
+            if (await EndpointAsync(extracted.SourceEntity, source: true).ConfigureAwait(false) is not { } sourceEntity)
             {
                 _logger.LogWarning(
                     "Skipping relationship — source entity '{Source}' was not persisted.",
@@ -778,7 +878,7 @@ internal sealed partial class PersistenceStage : IPersistenceStage
                 continue;
             }
 
-            if (!persistedEntityMap.TryGetValue(extracted.TargetEntity, out var targetEntity))
+            if (await EndpointAsync(extracted.TargetEntity, source: false).ConfigureAwait(false) is not { } targetEntity)
             {
                 _logger.LogWarning(
                     "Skipping relationship — target entity '{Target}' was not persisted.",
@@ -791,6 +891,21 @@ internal sealed partial class PersistenceStage : IPersistenceStage
                     SourceKey = relSourceKey,
                     ErrorCode = MemoryErrorCodes.RelationshipEndpointNotPersisted,
                     ErrorMessage = $"Target entity '{extracted.TargetEntity}' was not persisted.",
+                });
+                continue;
+            }
+
+            // I-7: "user -KNOWS-> Ana" said by Ana maps both ends to one person; no edge from a node to itself.
+            if (string.Equals(sourceEntity.EntityId, targetEntity.EntityId, StringComparison.Ordinal))
+            {
+                outcomes.Add(new IngestionItemOutcome
+                {
+                    Kind = MemoryItemKind.Relationship,
+                    Stage = IngestionStage.RelationshipPersistence,
+                    Status = IngestionItemStatus.Skipped,
+                    SourceKey = relSourceKey,
+                    ErrorCode = MemoryErrorCodes.RelationshipEndpointNotPersisted,
+                    ErrorMessage = "Both ends are the same entity.",
                 });
                 continue;
             }
@@ -975,23 +1090,6 @@ internal sealed partial class PersistenceStage : IPersistenceStage
         return new PreparedEmbeddings(entities, facts, preferences, outcomes);
     }
 
-    private sealed class FactTripleComparer : IEqualityComparer<(string Subject, string Predicate, string Object)>
-    {
-        public static FactTripleComparer OrdinalIgnoreCase { get; } = new();
-
-        public bool Equals(
-            (string Subject, string Predicate, string Object) left,
-            (string Subject, string Predicate, string Object) right) =>
-            StringComparer.OrdinalIgnoreCase.Equals(left.Subject, right.Subject) &&
-            StringComparer.OrdinalIgnoreCase.Equals(left.Predicate, right.Predicate) &&
-            StringComparer.OrdinalIgnoreCase.Equals(left.Object, right.Object);
-
-        public int GetHashCode((string Subject, string Predicate, string Object) value) =>
-            HashCode.Combine(
-                StringComparer.OrdinalIgnoreCase.GetHashCode(value.Subject),
-                StringComparer.OrdinalIgnoreCase.GetHashCode(value.Predicate),
-                StringComparer.OrdinalIgnoreCase.GetHashCode(value.Object));
-    }
     private sealed record PreparedEmbeddings(
         IReadOnlyDictionary<string, Entity> Entities,
         IReadOnlyList<PreparedFact> Facts,
@@ -999,6 +1097,178 @@ internal sealed partial class PersistenceStage : IPersistenceStage
         IReadOnlyList<IngestionItemOutcome> Outcomes);
 
     private sealed record PreparedFact(ExtractedFact Item, float[] Embedding);
+
+    /// <summary>
+    /// I-5: the name the user gave. This extraction's naming fact wins (the latest one in it); otherwise
+    /// the owner's latest live stored one; otherwise none, and nothing is rewritten.
+    /// </summary>
+    private async Task<string?> UserNameAsync(
+        IReadOnlyList<PreparedFact> facts, string ownerId, CancellationToken cancellationToken)
+    {
+        var stated = facts.Select(f => f.Item).LastOrDefault(UserNames.IsNamingFact)?.Object;
+        if (!string.IsNullOrWhiteSpace(stated)) return stated.Trim();
+
+        // Best-effort: a failed lookup leaves the facts under the words used, it never fails the persist.
+        try
+        {
+            var stored = await _factRepository.FindLatestObjectAsync(
+                UserNames.SelfWords, UserNames.NamingPredicates, MemoryScope.For(ownerId, includeShared: false),
+                cancellationToken).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(stored) ? null : stored.Trim();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read the user's name for owner {Owner}; facts keep the words used.", ownerId);
+            return null;
+        }
+    }
+
+    /// <summary>I-5: the words that mean the user, and the fact that names them.</summary>
+    internal static class UserNames
+    {
+        /// <summary>Words that can mean the speaker as a subject.</summary>
+        internal static readonly string[] SelfWords = ["user", "the user", "i", "me", "myself"];
+
+        /// <summary>
+        /// Words that mean the speaker as a fact's OBJECT. Not "I"/"me": as an object they are as often
+        /// something else ("lives in | ME", Maine), which a fact's free-text object cannot tell apart.
+        /// </summary>
+        private static readonly HashSet<string> UserAsObject = new(StringComparer.Ordinal) { "user", "the user" };
+
+        private static readonly HashSet<string> Self = new(SelfWords, StringComparer.Ordinal);
+
+        internal static readonly string[] NamingPredicates =
+            ["is named", "name is", "has name", "named", "is called", "goes by", "has the name"];
+
+        private static readonly HashSet<string> Naming = new(NamingPredicates, StringComparer.Ordinal);
+
+        internal static bool IsSelf(string? value) => Self.Contains(MemoryTripleCanonicalizer.CanonicalValue(value));
+
+        /// <summary>
+        /// I-7: whether a relationship endpoint is the user: any self word, at either end. Unlike a fact's
+        /// object, an endpoint is only ever asked about when it is not an extracted entity, so "ME" the
+        /// state would have resolved as one, and "Fabrikam EMPLOYS me" is the user.
+        /// </summary>
+        internal static bool MeansUserEndpoint(string? endpoint, bool source) => IsSelf(endpoint);
+
+        internal static bool IsNamingPredicate(string? predicate) => Naming.Contains(MemoryTripleCanonicalizer.Canonical(predicate));
+
+        internal static bool IsNamingFact(ExtractedFact fact) => IsSelf(fact.Subject) && IsNamingPredicate(fact.Predicate);
+
+        /// <summary>
+        /// Whether this slot of the fact is the user and may be stored under their name: never in the
+        /// naming fact itself, never in what the assistant said about itself ("I | recommend | …"), and
+        /// as an object only "user" / "the user", and only when the subject is not itself the user.
+        /// </summary>
+        internal static bool MeansUser(ExtractedFact fact, bool subject)
+        {
+            if (IsNamingFact(fact)) return false;
+            if (string.Equals(fact.SourceRole, "assistant", StringComparison.OrdinalIgnoreCase)) return false;
+            return subject
+                ? IsSelf(fact.Subject)
+                : UserAsObject.Contains(MemoryTripleCanonicalizer.CanonicalValue(fact.Object)) && !IsSelf(fact.Subject);
+        }
+    }
+
+    /// <summary>
+    /// I-6: one fact per statement within an extraction. Two facts are the same statement in other words
+    /// when they are at least <paramref name="threshold"/> similar AND <see cref="MayBeOneStatement"/>:
+    /// similarity alone scores "has 2 kids" / "has 3 kids" and "is vegetarian" / "is not vegetarian" as
+    /// near-identical. The kept phrasing is the user's over the assistant's, then the more confident, then
+    /// the first; it takes over a validity window or source turn only the other had, unless only the
+    /// assistant said it.
+    /// Each dropped fact gets a <see cref="IngestionItemStatus.Skipped"/> outcome naming the kept one, and
+    /// the span records how many were merged (<c>memory.persist.facts_merged</c>).
+    /// </summary>
+    private static (IReadOnlyList<PreparedFact> Kept, IReadOnlyList<IngestionItemOutcome> Merged) WithoutNearDuplicates(
+        IReadOnlyList<PreparedFact> facts, double threshold)
+    {
+        var kept = new List<PreparedFact>(facts.Count);
+        var merged = new List<IngestionItemOutcome>();
+        foreach (var fact in facts)
+        {
+            var twin = fact.Embedding is { Length: > 0 }
+                ? kept.FindIndex(k => k.Embedding is { Length: > 0 } && k.Embedding.Length == fact.Embedding.Length &&
+                                      MayBeOneStatement(k.Item, fact.Item) &&
+                                      Resolution.SemanticMatchEntityMatcher.CosineSimilarity(k.Embedding, fact.Embedding) >= threshold)
+                : -1;
+            if (twin < 0)
+            {
+                kept.Add(fact);
+                continue;
+            }
+            var (winner, loser) = Prefer(fact.Item, kept[twin].Item) ? (fact, kept[twin]) : (kept[twin], fact);
+            // What only the assistant said is not carried into the user's words.
+            var carry = !IsAssistant(loser.Item);
+            kept[twin] = winner with
+            {
+                Item = winner.Item with
+                {
+                    ValidFrom = winner.Item.ValidFrom ?? (carry ? loser.Item.ValidFrom : null),
+                    ValidUntil = winner.Item.ValidUntil ?? (carry ? loser.Item.ValidUntil : null),
+                    SourceTurn = winner.Item.SourceTurn ?? (carry ? loser.Item.SourceTurn : null),
+                },
+            };
+            merged.Add(new IngestionItemOutcome
+            {
+                Kind = MemoryItemKind.Fact,
+                Stage = IngestionStage.Persistence,
+                Status = IngestionItemStatus.Skipped,
+                SourceKey = $"{loser.Item.Subject} {loser.Item.Predicate} {loser.Item.Object}",
+                ErrorCode = MemoryErrorCodes.FactMergedWithinExtraction,
+                ErrorMessage = $"Same statement as '{winner.Item.Subject} {winner.Item.Predicate} {winner.Item.Object}' in this extraction.",
+            });
+        }
+        if (merged.Count > 0)
+            System.Diagnostics.Activity.Current?.SetTag("memory.persist.facts_merged", merged.Count);
+        return (kept, merged);
+
+        // The user's own words over the assistant's paraphrase of them (what memory records is what the
+        // user said), then confidence; the earlier phrasing on a tie.
+        static bool Prefer(ExtractedFact candidate, ExtractedFact current)
+        {
+            if (IsAssistant(candidate) != IsAssistant(current)) return IsAssistant(current);
+            return candidate.Confidence > current.Confidence;
+        }
+
+        static bool IsAssistant(ExtractedFact fact) =>
+            string.Equals(fact.SourceRole, "assistant", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static readonly HashSet<string> NegationWords = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "not", "no", "never", "none", "nothing", "nobody", "neither", "nor", "without", "cannot", "non",
+    };
+
+    /// <summary>
+    /// Whether two facts CAN be one statement phrased twice, whatever their similarity: the same subject,
+    /// only one of predicate and object worded differently, the same numbers, the same negations, and no
+    /// conflicting validity window. Conservative on purpose: a missed merge leaves a duplicate line, a wrong
+    /// one loses a fact.
+    /// </summary>
+    internal static bool MayBeOneStatement(ExtractedFact left, ExtractedFact right)
+    {
+        static string Key(string value) => MemoryTripleCanonicalizer.CanonicalValue(value);
+        // The fact that names the user is how the name is found in every later session: never merged away.
+        if (UserNames.IsNamingFact(left) || UserNames.IsNamingFact(right)) return false;
+        if (Key(left.Subject) != Key(right.Subject)) return false;
+        if (Key(left.Predicate) != Key(right.Predicate) && Key(left.Object) != Key(right.Object)) return false;
+        if (Numbers(left) != Numbers(right) || Negations(left) != Negations(right)) return false;
+        return Agree(left.ValidFrom, right.ValidFrom) && Agree(left.ValidUntil, right.ValidUntil);
+
+        static bool Agree(DateTimeOffset? a, DateTimeOffset? b) => a is null || b is null || a == b;
+
+        static string Numbers(ExtractedFact fact) => string.Join(
+            ",", System.Text.RegularExpressions.Regex.Matches($"{fact.Predicate} {fact.Object}", "[0-9]+").Select(m => m.Value));
+
+        static string Negations(ExtractedFact fact) => string.Join(
+            ",", System.Text.RegularExpressions.Regex.Split(
+                    $"{fact.Predicate} {fact.Object}".Replace("n't", " not", StringComparison.OrdinalIgnoreCase), "[^A-Za-z]+")
+                .Where(NegationWords.Contains)
+                .Select(word => word.ToLowerInvariant())
+                .Order(StringComparer.Ordinal));
+    }
 
     private sealed record PreparedPreference(ExtractedPreference Item, float[] Embedding);
 

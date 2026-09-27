@@ -21,9 +21,23 @@ public sealed class AgentTraceRecorder
     private readonly IIdGenerator _idGenerator;
     private readonly bool _persist;
     private readonly ILogger<AgentTraceRecorder> _logger;
+    private readonly IMemoryOwnerContext? _ownerContext;
 
     // Tracks current step count per active trace.
     private readonly ConcurrentDictionary<string, int> _stepCounts = new();
+
+    /// <summary>The 1.5.0 constructor, kept so assemblies compiled against it still load (an added
+    /// optional parameter is a binary break). New code uses the full constructor.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public AgentTraceRecorder(
+        IReasoningMemoryService reasoningService,
+        IClock clock,
+        IIdGenerator idGenerator,
+        IOptions<AgentFrameworkOptions> options,
+        ILogger<AgentTraceRecorder> logger)
+        : this(reasoningService, clock, idGenerator, options, logger, ownerContext: null)
+    {
+    }
 
     /// <summary>
     /// Initializes a new <see cref="AgentTraceRecorder"/>.
@@ -33,13 +47,21 @@ public sealed class AgentTraceRecorder
     /// <param name="idGenerator">Generates unique identifiers for trace and step records.</param>
     /// <param name="options">Agent-framework options; <c>PersistReasoningTraces</c> gates persistence.</param>
     /// <param name="logger">Logger for diagnostics and warnings.</param>
+    /// <param name="ownerContext">
+    /// The ambient owner scope, used when <see cref="StartTraceAsync"/> is given no owner: the one the
+    /// provider opens for a turn. Without it a host under strict isolation had to pass the owner by hand,
+    /// or every trace write failed.
+    /// </param>
+    [Microsoft.Extensions.DependencyInjection.ActivatorUtilitiesConstructor]
     public AgentTraceRecorder(
         IReasoningMemoryService reasoningService,
         IClock clock,
         IIdGenerator idGenerator,
         IOptions<AgentFrameworkOptions> options,
-        ILogger<AgentTraceRecorder> logger)
+        ILogger<AgentTraceRecorder> logger,
+        IMemoryOwnerContext? ownerContext = null)
     {
+        _ownerContext = ownerContext;
         _reasoningService = reasoningService ?? throw new ArgumentNullException(nameof(reasoningService));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _idGenerator = idGenerator ?? throw new ArgumentNullException(nameof(idGenerator));
@@ -62,6 +84,7 @@ public sealed class AgentTraceRecorder
         string? ownerId = null,
         CancellationToken cancellationToken = default)
     {
+        ownerId ??= _ownerContext?.UserId;
         if (!_persist)
         {
             var synthetic = new ReasoningTrace

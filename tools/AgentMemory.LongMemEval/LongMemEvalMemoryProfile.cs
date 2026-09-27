@@ -265,6 +265,9 @@ internal sealed class LongMemEvalMemoryProfile : IAsyncDisposable
                 // this project has built records the corpus's stated identities -- "the new flat is
                 // the place on Ferrow Row" -- as ordinary prose and never as an alias.
                 options.CaptureIdentityAliases = captureIdentityAliases;
+                // 2026-09-27 defaults (name capture, questions ignored) pinned off: the measured path.
+                options.CaptureUserName = false;
+                options.IgnoreQuestions = false;
             }
             : null;
         services.AddNeo4jAgentMemory(
@@ -282,13 +285,18 @@ internal sealed class LongMemEvalMemoryProfile : IAsyncDisposable
                 // from the benchmark, so the mechanism most directly matching the measured failure
                 // mode was the one thing no run could exercise.
                 RescueShortOwnerResults = rescueShortOwnerResults,
+                // 2026-09-27 default (G-14: small owners scored exactly, not via the global index) pinned off:
+                // every sealed measurement was taken on the index path.
+                OwnerFirstVectorThreshold = 0,
                 // Off unless asked for, so every sealed measurement keeps its path. FanOut is a
                 // mutable class precisely so this assignment is possible (#100 lesson).
                 FanOut = { Enabled = recallFanOut },
                 // 30.4 / 30.6. Off unless the run asks for them, so every sealed measurement keeps
                 // taking the path it was taken under; an ablation turns one on and re-runs the SAME
                 // frozen corpus and seed.
-                WorkingMemory = { Enabled = phase30.WorkingMemory },
+                // MinFactMentionCount pinned to the 2 the measured wm arm ran with (the library default became 1).
+                // RecentStableFactSlots pinned to 0: the measured arm chose slots by mentions only.
+                WorkingMemory = { Enabled = phase30.WorkingMemory, MinFactMentionCount = 2, RecentStableFactSlots = 0 },
                 // WAVE E-1 FOLLOW-UP. The READ side of the identity edge. Its traversal walks
                 // [:RELATED_TO|ABOUT*..4], and until E-1 no store this library built contained a
                 // single ABOUT edge -- so the re-ranker has always been weaker than its own query
@@ -298,6 +306,8 @@ internal sealed class LongMemEvalMemoryProfile : IAsyncDisposable
                 Extraction =
                 {
                     DerivedMemory = { Enabled = phase30.ArithmeticMemory },
+                    // 2026-09-27 default (facts stored under the user's name) pinned off: the measured path.
+                    ResolveUserToName = false,
                     // The lever the four-vertical run proved was missing. `SupersedeReplacedFacts`
                     // defaults FALSE and no harness reference existed, so the Bitemporal vertical --
                     // whose whole subject is supersession -- was measured against an append-only

@@ -18,6 +18,12 @@ public sealed class LlmExtractionOptions
     public int MaxRetries { get; set; } = 2;
 
     /// <summary>
+    /// Log the first 2,000 characters of a reply that could not be used (Warning level). Off by default:
+    /// the reply is model output about the user's conversation, so it is content, not telemetry.
+    /// </summary>
+    public bool LogRawResponseOnFailure { get; set; }
+
+    /// <summary>
     /// Whether extraction requests should ask the chat provider for a JSON response.
     /// Disable only for providers that do not support the portable response-format hint.
     /// </summary>
@@ -96,6 +102,22 @@ public sealed class LlmExtractionOptions
     /// </para>
     /// </remarks>
     public bool CaptureIdentityAliases { get; set; }
+
+    /// <summary>
+    /// I-5 (default true since 2026-09-27): ask every extractor for the user's own name as a
+    /// <c>user | is named | &lt;name&gt;</c> fact when the user states it. It is what
+    /// <c>ExtractionOptions.ResolveUserToName</c> reads, one layer down; off, every prompt is byte-for-byte
+    /// what it was before the option existed.
+    /// </summary>
+    public bool CaptureUserName { get; set; } = true;
+
+    /// <summary>
+    /// A question states nothing (default true since 2026-09-27): no fact, entity or relationship is made
+    /// from what the user asks, only from what a question states outright ("my trip to Seville next week").
+    /// Measured live: "What do you remember about my brother?" produced an entity "user's brother" and the
+    /// fact "Marta has a brother brother". Off, every prompt is byte-for-byte what it was.
+    /// </summary>
+    public bool IgnoreQuestions { get; set; } = true;
 
     /// <summary>
     /// How precisely a stored fact or preference is bound to the turn that stated it.

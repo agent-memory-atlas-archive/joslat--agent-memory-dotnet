@@ -1,3 +1,4 @@
+using AgentMemory.Tests.Unit.TestSupport;
 using FluentAssertions;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -25,6 +26,7 @@ public sealed class Neo4jMemoryContextProviderTests
     public Neo4jMemoryContextProviderTests()
     {
         _clock.UtcNow.Returns(DateTimeOffset.UtcNow);
+        _memoryService.RouteIdKeyedAdds();
         _idGenerator.GenerateId().Returns(_ => Guid.NewGuid().ToString("N"));
         _sut = new Neo4jMemoryContextProvider(
             _memoryService,
@@ -196,6 +198,29 @@ public sealed class Neo4jMemoryContextProviderTests
                 r.Options.MaxTraces == 0 &&           // excluded -- zeroed
                 r.Options.MaxGraphRagItems == 0),     // excluded -- zeroed
             Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 3)]
+    public async Task BuildContextAsync_SearchesReasoningTracesOnlyWhenTheFormatterShowsThem(bool include, int expected)
+    {
+        // H-4: with IncludeReasoningTraces off (the default) the formatter drops traces, so searching them was a
+        // vector query per turn whose result was thrown away (measured ≈35 ms a turn).
+        var sut = new Neo4jMemoryContextProvider(
+            _memoryService, _embeddingOrchestrator, _clock, _idGenerator,
+            Options.Create(new MemoryOptions { Recall = new RecallOptions { MaxTraces = 3 } }),
+            Options.Create(new ContextFormatOptions { IncludeReasoningTraces = include }),
+            Options.Create(new AgentFrameworkOptions()),
+            NullLogger<Neo4jMemoryContextProvider>.Instance);
+        _embeddingOrchestrator.EmbedAsync(Arg.Any<string>(), Arg.Any<CancellationToken>()).Returns(new float[] { 0.1f });
+        _memoryService.RecallAsync(Arg.Any<RecallRequest>(), Arg.Any<CancellationToken>()).Returns(EmptyRecall("s1"));
+
+        await sut.BuildContextAsync(
+            new List<ChatMessage> { new(ChatRole.User, "How did I plan the last trip?") }, "s1", "c1", CancellationToken.None);
+
+        await _memoryService.Received(1).RecallAsync(
+            Arg.Is<RecallRequest>(r => r.Options!.MaxTraces == expected), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -728,7 +753,7 @@ public sealed class Neo4jMemoryContextProviderTests
         // request message, since a host may also have Neo4jChatHistoryProvider/Neo4jChatMessageStore/their
         // own component persisting the same messages, and there is no idempotency mechanism to make a
         // second persist call for "the same" logical message safe.
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         var storedResponse = new Message
         {
             MessageId = "m-resp", SessionId = "s1", ConversationId = "c1",
@@ -768,7 +793,7 @@ public sealed class Neo4jMemoryContextProviderTests
         // A system prompt accumulated in RequestMessages must not be minted into spurious
         // entities/facts/preferences every turn -- extraction is filtered to ChatRole.User, matching the
         // same filter recall already applies.
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         var storedResponse = new Message
         {
             MessageId = "m-resp", SessionId = "s1", ConversationId = "c1",
@@ -801,7 +826,7 @@ public sealed class Neo4jMemoryContextProviderTests
     [Fact]
     public async Task PerformStoreAsync_ExtractionSeesRequestAndResponseMessages()
     {
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         var storedResponse = new Message
         {
             MessageId = "m-resp", SessionId = "s1", ConversationId = "c1",
@@ -835,7 +860,7 @@ public sealed class Neo4jMemoryContextProviderTests
     [Fact]
     public async Task PerformStoreAsync_RequestOnly_StillExtracts()
     {
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         _memoryService.ExtractAndPersistAsync(Arg.Any<ExtractionRequest>(), Arg.Any<CancellationToken>())
             .Returns(new ExtractionResult
             {
@@ -862,7 +887,7 @@ public sealed class Neo4jMemoryContextProviderTests
     [Fact]
     public async Task PerformStoreAsync_MessageOrdering_RequestBeforeResponse()
     {
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         var storedResponse = new Message
         {
             MessageId = "m-resp", SessionId = "s1", ConversationId = "c1",
@@ -998,7 +1023,7 @@ public sealed class Neo4jMemoryContextProviderTests
     [Fact]
     public async Task PerformStoreAsync_FunctionCallOnlyResponseMessage_IsExcludedFromPersistenceAndExtraction()
     {
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         var functionCallMessage = new ChatMessage(
             ChatRole.Assistant, new List<AIContent> { new FunctionCallContent("call-1", "search_memory") });
         _memoryService.ExtractAndPersistAsync(Arg.Any<ExtractionRequest>(), Arg.Any<CancellationToken>())
@@ -1030,7 +1055,7 @@ public sealed class Neo4jMemoryContextProviderTests
     [Fact]
     public async Task PerformStoreAsync_AutoExtractEnabled_CallsExtractAndPersistAsync()
     {
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         var messages = new List<ChatMessage> { new(ChatRole.Assistant, "Paris is the capital of France.") };
         var storedMessage = new Message
         {
@@ -1063,7 +1088,7 @@ public sealed class Neo4jMemoryContextProviderTests
     [Fact]
     public async Task PerformStoreAsync_AutoExtractEnabled_WithUserId_StampsExtractionOwner()
     {
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         var messages = new List<ChatMessage> { new(ChatRole.Assistant, "Paris is the capital of France.") };
         var storedMessage = new Message
         {
@@ -1133,7 +1158,7 @@ public sealed class Neo4jMemoryContextProviderTests
     [Fact]
     public async Task PerformStoreAsync_AutoExtractEnabled_ExceptionInExtraction_IsCaughtGracefully()
     {
-        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true });
+        var sut = CreateSut(new AgentFrameworkOptions { AutoExtractOnPersist = true, ExtractFromUserMessagesOnly = false });
         var messages = new List<ChatMessage> { new(ChatRole.Assistant, "Important data.") };
         var storedMessage = new Message
         {

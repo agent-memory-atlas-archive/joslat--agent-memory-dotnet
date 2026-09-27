@@ -24,6 +24,7 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
     private readonly IClock _clock;
     private readonly IIdGenerator _idGenerator;
     private readonly AgentFrameworkOptions _options;
+    private readonly IBackgroundExtraction? _backgroundExtraction;
     private readonly IMemoryStoreContext? _storeContext;
     private readonly IWritableMemoryOwnerContext? _ownerContext;
     private readonly ILogger<Neo4jChatHistoryProvider> _logger;
@@ -33,6 +34,23 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
     public override IReadOnlyList<string> StateKeys { get; } =
         new[] { nameof(Neo4jChatHistoryProvider) };
 
+    /// <summary>The 1.5.0 constructor, kept so assemblies compiled against it still load (an added
+    /// optional parameter is a binary break). New code uses the full constructor.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Neo4jChatHistoryProvider(
+        IMemoryService memoryService,
+        IClock clock,
+        IIdGenerator idGenerator,
+        AgentFrameworkOptions options,
+        ILogger<Neo4jChatHistoryProvider> logger,
+        IMemoryStoreContext? storeContext,
+        IWritableMemoryOwnerContext? ownerContext,
+        IMemoryContextAdmissionPolicy? admissionPolicy)
+        : this(memoryService, clock, idGenerator, options, logger, storeContext, ownerContext, admissionPolicy, backgroundExtraction: null)
+    {
+    }
+
+    [Microsoft.Extensions.DependencyInjection.ActivatorUtilitiesConstructor]
     public Neo4jChatHistoryProvider(
         IMemoryService memoryService,
         IClock clock,
@@ -41,7 +59,8 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
         ILogger<Neo4jChatHistoryProvider> logger,
         IMemoryStoreContext? storeContext = null,
         IWritableMemoryOwnerContext? ownerContext = null,
-        IMemoryContextAdmissionPolicy? admissionPolicy = null)
+        IMemoryContextAdmissionPolicy? admissionPolicy = null,
+        IBackgroundExtraction? backgroundExtraction = null)
         // storeInputRequestMessageFilter narrows MAF's own default (which excludes only ChatHistory-sourced
         // messages) down to External-only. Without this, when a host also configures an AIContextProvider
         // (e.g. Neo4jMemoryContextProvider) on the same agent, that provider's injected messages (recalled
@@ -51,8 +70,7 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
         // history would now have it silently excluded too -- treating provider-injected context as
         // ephemeral (not history) is the correct default for this library, but it is a real behavior
         // change from MAF's own out-of-the-box default for that uncommon case.
-        : base(null, static msgs => msgs.Where(
-            m => m.GetAgentRequestMessageSourceType() == AgentRequestMessageSourceType.External), null)
+        : base(null, AgentMemoryChatHistory.ExcludeInjectedContext, null)
     {
         _memoryService = memoryService ?? throw new ArgumentNullException(nameof(memoryService));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
@@ -65,6 +83,7 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
         // MafTypeMapper.ToChatMessage with no admission-check or privileged-role gating at all, unlike
         // ToContextMessages' handling of the identical underlying data -- see ToGatedChatMessages' remarks.
         _admissionPolicy = admissionPolicy ?? new DefaultMemoryContextAdmissionPolicy();
+        _backgroundExtraction = backgroundExtraction;
     }
 
     /// <summary>
@@ -153,10 +172,11 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
                 if (string.IsNullOrWhiteSpace(msg.Text)) continue;
                 var message = MafTypeMapper.ToInternalMessage(
                     msg, sessionId, conversationId, _clock, _idGenerator);
+                // Under the message's one shared id, the one the context provider stores it under too.
                 var stored = await _memoryService
-                    .AddMessageAsync(
+                    .AddMessageWithIdAsync(
                         message.SessionId, message.ConversationId,
-                        message.Role, message.Content, message.Metadata,
+                        message.Role, message.Content, MafTypeMapper.EnsureProviderMessageId(msg), message.Metadata,
                         cancellationToken)
                     .ConfigureAwait(false);
                 storedRequests.Add(stored);
@@ -198,25 +218,14 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
             var turnMessages = storedRequests.Where(m => m.Role == "user").Concat(storedResponses).ToList();
             if (_options.AutoExtractOnPersist && turnMessages.Count > 0)
             {
-                try
-                {
-                    await _memoryService.ExtractAndPersistAsync(
-                        new Abstractions.Domain.ExtractionRequest
-                        {
-                            Messages = turnMessages,
-                            SessionId = sessionId,
-                            UserId = userId
-                        }, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "Extraction failed for session {SessionId}; messages were persisted.", sessionId);
-                }
+                await TurnExtraction.ExtractAsync(
+                    _memoryService,
+                    new Abstractions.Domain.ExtractionRequest
+                    {
+                        Messages = turnMessages,
+                        SessionId = sessionId,
+                        UserId = userId
+                    }, _options, _backgroundExtraction, _logger, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -269,4 +278,4 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
     // MemoryOwnerScopingAgent (#90), which wraps the complete invocation for that guarantee. See also
     // docs/reviews/review-2026-06-13-cycle3.md (finding #4).
     private IDisposable? ApplyOwnerContext(string? userId) => _ownerContext?.BeginOwnerScope(userId);
-}
+}
