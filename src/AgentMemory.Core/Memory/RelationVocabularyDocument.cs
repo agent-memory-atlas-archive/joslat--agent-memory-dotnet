@@ -60,6 +60,35 @@ internal sealed class RelationVocabularyEntry
     /// </remarks>
     [JsonPropertyName("cardinality")]
     public string? Cardinality { get; init; }
+
+    /// <summary>
+    /// 36.4. The state relation this event also states, with the same subject and object: "moved to X" entails
+    /// "lives in X". Read only by write-time supersession, which writes the entailed state so that it replaces
+    /// the previous value of that state. <c>entailsWhy</c> carries the argument.
+    /// </summary>
+    [JsonPropertyName("entails")]
+    public string? Entails { get; init; }
+
+    /// <summary>
+    /// 36.4. The stored forms that state this single-valued relation's CURRENT value, and so replace each other:
+    /// "works for" replaces "works at"; "worked at" (history) and "used to work in" are not listed, so they neither
+    /// replace nor are replaced. Absent, a value replaces only a value stored under its own predicate.
+    /// </summary>
+    [JsonPropertyName("presentForms")]
+    public IReadOnlyList<string> PresentForms { get; init; } = [];
+
+    /// <summary>
+    /// 36.4. The forms of this event that entail <see cref="Entails"/>: "moved to" does, "moving to" (not yet) does not.
+    /// </summary>
+    [JsonPropertyName("entailsFrom")]
+    public IReadOnlyList<string> EntailsFrom { get; init; } = [];
+
+    /// <summary>
+    /// The entity type the object must have for <see cref="Entails"/> to hold (<c>LOCATION</c> for "moved to"),
+    /// or null for always. An object the extraction did not type does not entail.
+    /// </summary>
+    [JsonPropertyName("entailsWhen")]
+    public string? EntailsWhen { get; init; }
 }
 
 internal sealed class RelationVocabularyDocument
@@ -84,6 +113,14 @@ internal sealed class RelationVocabularyDocument
     /// </remarks>
     [JsonPropertyName("expansionExempt")]
     public IReadOnlyDictionary<string, string> ExpansionExempt { get; init; } =
+        new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// 36.4. Predicate prefixes that name a single-valued relation per thing: <c>favourite</c> makes
+    /// "favourite band" single-valued and "favourite food" another single-valued relation. Each with its reason.
+    /// </summary>
+    [JsonPropertyName("singleValuedPrefixes")]
+    public IReadOnlyDictionary<string, string> SingleValuedPrefixes { get; init; } =
         new Dictionary<string, string>(StringComparer.Ordinal);
 
     [JsonPropertyName("canonical")]

@@ -120,6 +120,26 @@ public sealed class LlmExtractionOptions
     public bool IgnoreQuestions { get; set; } = true;
 
     /// <summary>
+    /// 36.3. A preference is the user's own stated taste: someone else's taste is recorded as a fact about
+    /// them, and a request is not a preference. Measured live: a taught book produced "user preferences"
+    /// that were its characters' ("Alice does not like raw eggs", "The Mouse hates cats"), and "Recommend
+    /// some music…" was stored as the user's preference. A preference always renders as the user's, so
+    /// both read to the agent as things the person said about themselves. Off, every prompt is
+    /// byte-for-byte what it was.
+    /// </summary>
+    public bool OwnPreferencesOnly { get; set; }
+
+    /// <summary>
+    /// 36.4. Ask every extractor to mark what a correction replaces ("actually Arcade Fire, not Radiohead" adds
+    /// <c>"replaces": "Radiohead"</c>), so the write can close the old fact or preference even when nothing else
+    /// ties the two together (a preference has no single-valued relation; "the full marathon instead of the half"
+    /// is a new plan, not a new value of one). Read by <c>ExtractionOptions.SupersedeReplacedFacts</c>. Found in
+    /// simulated conversations: both bands, both marathons and both ages stayed live. Off, every prompt is
+    /// byte-for-byte what it was.
+    /// </summary>
+    public bool MarkCorrections { get; set; }
+
+    /// <summary>
     /// How precisely a stored fact or preference is bound to the turn that stated it.
     /// </summary>
     /// <remarks>

@@ -27,9 +27,11 @@ public sealed class WithinExtractionDedupTests
         : text.Contains("dashboard", StringComparison.Ordinal) ? [0f, 1f, 0f, 0f]
         : [0f, 0f, 1f, 0f];
 
-    private PersistenceStage Sut(bool dedup)
+    private readonly IFactRepository _facts = Substitute.For<IFactRepository>();
+
+    private PersistenceStage Sut(bool dedup, bool supersede = false)
     {
-        var facts = Substitute.For<IFactRepository>();
+        var facts = _facts;
         facts.UpsertAsync(Arg.Any<Fact>(), Arg.Any<CancellationToken>())
             .Returns(call => { _upserted.Add(call.Arg<Fact>()); return call.Arg<Fact>(); });
         var embeddings = Substitute.For<IEmbeddingOrchestrator>();
@@ -44,7 +46,10 @@ public sealed class WithinExtractionDedupTests
         return new PersistenceStage(embeddings, Substitute.For<IEntityRepository>(), facts, Substitute.For<IPreferenceRepository>(),
             Substitute.For<IRelationshipRepository>(), clock, ids, NullLogger<PersistenceStage>.Instance,
             new PassThroughMemoryPersistenceTransaction(),
-            Options.Create(new ExtractionOptions { DeduplicateWithinExtraction = dedup, EnableBatchMemoryUpserts = false }));
+            Options.Create(new ExtractionOptions
+            {
+                DeduplicateWithinExtraction = dedup, EnableBatchMemoryUpserts = false, SupersedeReplacedFacts = supersede,
+            }));
     }
 
     private static ExtractionStageResult Extraction() => new()
@@ -121,7 +126,7 @@ public sealed class WithinExtractionDedupTests
             FilteredFacts =
             [
                 new ExtractedFact { Subject = "Tomás Silva", Predicate = "moved to", Object = "analytics", Confidence = 0.8,
-                    SourceRole = "user", ValidFrom = DateTimeOffset.Parse("2026-09-01T00:00:00Z") },
+                    SourceRole = "user", ValidFrom = DateTimeOffset.Parse("2026-09-01T00:00:00Z"), ValidFromPrecision = DatePrecision.Month },
                 new ExtractedFact { Subject = "Tomás Silva", Predicate = "moved to", Object = "analytics team", Confidence = 0.95,
                     SourceRole = "assistant" },
             ],
@@ -132,6 +137,7 @@ public sealed class WithinExtractionDedupTests
         var stored = _upserted.Should().ContainSingle().Subject;
         stored.Object.Should().Be("analytics", "the user's own words beat the assistant's paraphrase");
         stored.ValidFrom.Should().Be(DateTimeOffset.Parse("2026-09-01T00:00:00Z"));
+        stored.ValidFromPrecision.Should().Be(DatePrecision.Month, "36.1: the stored fact keeps how precisely its date was stated");
         var merged = result.Outcomes.Should().ContainSingle(o => o.Status == IngestionItemStatus.Skipped).Subject;
         merged.SourceKey.Should().Be("Tomás Silva moved to analytics team");
         merged.ErrorCode.Should().Be(MemoryErrorCodes.FactMergedWithinExtraction);
@@ -147,7 +153,7 @@ public sealed class WithinExtractionDedupTests
             FilteredFacts =
             [
                 new ExtractedFact { Subject = "Tomás Silva", Predicate = "moved to", Object = "analytics", Confidence = 0.8,
-                    ValidFrom = DateTimeOffset.Parse("2026-09-01T00:00:00Z") },
+                    ValidFrom = DateTimeOffset.Parse("2026-09-01T00:00:00Z"), ValidFromPrecision = DatePrecision.Month },
                 new ExtractedFact { Subject = "Tomás Silva", Predicate = "moved to", Object = "analytics team", Confidence = 0.9 },
             ],
         };
@@ -157,5 +163,101 @@ public sealed class WithinExtractionDedupTests
         var stored = _upserted.Should().ContainSingle().Subject;
         stored.Object.Should().Be("analytics team");
         stored.ValidFrom.Should().Be(DateTimeOffset.Parse("2026-09-01T00:00:00Z"));
+        stored.ValidFromPrecision.Should().Be(DatePrecision.Month, "a date and its precision are carried together");
+    }
+
+    [Fact]
+    public async Task The_day_an_event_happened_is_carried_like_its_other_dates()
+    {
+        var extraction = new ExtractionStageResult
+        {
+            FilteredFacts =
+            [
+                new ExtractedFact { Subject = "Tomás Silva", Predicate = "moved to", Object = "analytics", Confidence = 0.8,
+                    OccurredOn = DateTimeOffset.Parse("2026-09-01T00:00:00Z"), OccurredOnPrecision = DatePrecision.Month },
+                new ExtractedFact { Subject = "Tomás Silva", Predicate = "moved to", Object = "analytics team", Confidence = 0.9 },
+            ],
+        };
+
+        await Sut(dedup: true).PersistAsync(extraction, ownerId: "owner-1", cancellationToken: CancellationToken.None);
+
+        var stored = _upserted.Should().ContainSingle().Subject;
+        stored.OccurredOn.Should().Be(DateTimeOffset.Parse("2026-09-01T00:00:00Z"));
+        stored.OccurredOnPrecision.Should().Be(DatePrecision.Month);
+    }
+
+    [Fact]
+    public async Task The_dropped_phrasings_correction_is_carried_like_its_date()
+    {
+        // 36.4: a correction the merged-away phrasing carried still closes what it replaces.
+        _facts.GetBySubjectAsync(Arg.Any<string>(), Arg.Any<MemoryScope?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<Fact>>(
+            [
+                new Fact { FactId = "finance", Subject = "Tomás Silva", Predicate = "moved to", Object = "finance", Confidence = 0.9, CreatedAtUtc = DateTimeOffset.UnixEpoch },
+            ]));
+        _facts.FindSupersededCandidatesAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(),
+                Arg.Any<MemoryScope?>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult<IReadOnlyList<Fact>>([]));
+        var extraction = new ExtractionStageResult
+        {
+            SourceMessageIds = ["message-1"],
+            ResolvedEntityMap = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase),
+            FilteredFacts =
+            [
+                new ExtractedFact { Subject = "Tomás Silva", Predicate = "moved to", Object = "analytics", Confidence = 0.8, Replaces = "finance" },
+                new ExtractedFact { Subject = "Tomás Silva", Predicate = "moved to", Object = "analytics team", Confidence = 0.9 },
+            ],
+        };
+
+        await Sut(dedup: true, supersede: true).PersistAsync(extraction, ownerId: "owner-1", cancellationToken: CancellationToken.None);
+
+        await _facts.Received(1).SupersedeAsync("finance", Arg.Any<string>(), Arg.Any<MemoryScope?>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>36.6 (D-6, review): the speaker is stored as an entity only until their name is known.</summary>
+    [Fact]
+    public async Task The_speaker_is_not_stored_as_an_entity_once_their_name_is_known()
+    {
+        var entities = Substitute.For<IEntityRepository>();
+        var written = new List<string>();
+        entities.UpsertAsync(Arg.Any<Entity>(), Arg.Any<CancellationToken>())
+            .Returns(ci => { written.Add(ci.Arg<Entity>().Name); return Task.FromResult(ci.Arg<Entity>()); });
+        _facts.UpsertAsync(Arg.Any<Fact>(), Arg.Any<CancellationToken>()).Returns(ci => Task.FromResult(ci.Arg<Fact>()));
+        var clock = Substitute.For<IClock>();
+        clock.UtcNow.Returns(DateTimeOffset.Parse("2026-09-26T00:00:00Z"));
+        var ids = Substitute.For<IIdGenerator>();
+        ids.GenerateId().Returns(_ => Guid.NewGuid().ToString("N"));
+        var stage = new PersistenceStage(Substitute.For<IEmbeddingOrchestrator>(), entities, _facts, Substitute.For<IPreferenceRepository>(),
+            Substitute.For<IRelationshipRepository>(), clock, ids, NullLogger<PersistenceStage>.Instance,
+            new PassThroughMemoryPersistenceTransaction(),
+            Options.Create(new ExtractionOptions { EnableBatchMemoryUpserts = false }));
+        Entity E(string name) => new() { EntityId = name, Name = name, Type = "PERSON", Confidence = 1, CreatedAtUtc = DateTimeOffset.UnixEpoch };
+        ExtractionStageResult With(params ExtractedFact[] facts) => new()
+        {
+            ResolvedEntityMap = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase) { ["user"] = E("user"), ["Carmen"] = E("Carmen") },
+            FilteredFacts = facts,
+        };
+
+        await stage.PersistAsync(With(
+            new ExtractedFact { Subject = "user", Predicate = "is named", Object = "Rosa", Confidence = 1 },
+            new ExtractedFact { Subject = "user", Predicate = "works as", Object = "architect", Confidence = 1 }), ownerId: "owner-1");
+        written.Should().BeEquivalentTo(["Rosa", "Carmen"], "the speaker is written as the named person, never as \"user\"");
+
+        written.Clear();
+        var alreadyThere = With(
+            new ExtractedFact { Subject = "user", Predicate = "is named", Object = "Rosa", Confidence = 1 },
+            new ExtractedFact { Subject = "user", Predicate = "works as", Object = "architect", Confidence = 1 }) with
+        {
+            ResolvedEntityMap = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["user"] = E("user"), ["Rosa"] = E("Rosa"), ["Carmen"] = E("Carmen"),
+            },
+        };
+        await stage.PersistAsync(alreadyThere, ownerId: "owner-1");
+        written.Should().BeEquivalentTo(["Rosa", "Carmen"], "the named person is an entity already: the speaker is not written twice");
+
+        written.Clear();
+        await stage.PersistAsync(With(new ExtractedFact { Subject = "Carmen", Predicate = "teaches", Object = "maths", Confidence = 1 }), ownerId: "owner-1");
+        written.Should().BeEquivalentTo(["user", "Carmen"], "no name known: stored as before, so nothing hanging from it is lost");
     }
 }

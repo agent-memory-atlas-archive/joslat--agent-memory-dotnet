@@ -38,7 +38,7 @@ internal static class WorkingMemoryQueries
     public const string SelectStableFacts = @"
             MATCH (f:Fact {owner_id: $ownerId})
             WHERE f.invalidated_at IS NULL
-              AND (f.valid_from  IS NULL OR f.valid_from  <= datetime($now))
+              AND (coalesce(f.valid_from, f.occurred_on) IS NULL OR coalesce(f.valid_from, f.occurred_on) <= datetime($now))
               AND (f.valid_until IS NULL OR f.valid_until >  datetime($now))
               AND coalesce(f.mention_count, 1) >= $minMentions
             WITH f
@@ -50,7 +50,10 @@ internal static class WorkingMemoryQueries
             ORDER BY r.created_at DESC, r.id ASC
             WITH top, [x IN collect(r) WHERE x IS NOT NULL][0..$recent] AS recent
             UNWIND top + recent AS f
-            RETURN f.subject AS subject, f.predicate AS predicate, f.object AS object
+            RETURN f.subject AS subject, f.predicate AS predicate, f.object AS object,
+                   f.valid_from AS validFrom, f.valid_from_precision AS validFromPrecision,
+                   f.valid_until AS validUntil, f.valid_until_precision AS validUntilPrecision,
+                   f.occurred_on AS occurredOn, f.occurred_on_precision AS occurredOnPrecision
             ORDER BY f.created_at ASC, f.id ASC";
 
     /// <summary>Active preferences: live and above the confidence floor.</summary>
@@ -115,7 +118,7 @@ internal static class WorkingMemoryQueries
             MATCH (f:Fact {owner_id: $ownerId})
             WHERE f.invalidated_at IS NULL
               AND coalesce(f.mention_count, 1) >= $minMentions
-            WITH [x IN [f.valid_from, f.valid_until] WHERE x IS NOT NULL AND x > datetime($now)] AS upcoming
+            WITH [x IN [coalesce(f.valid_from, f.occurred_on), f.valid_until] WHERE x IS NOT NULL AND x > datetime($now)] AS upcoming
             UNWIND upcoming AS boundary
             RETURN min(boundary) AS boundary";
 

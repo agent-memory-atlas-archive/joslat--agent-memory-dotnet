@@ -62,13 +62,16 @@ internal sealed class LlmUnifiedMemoryExtractor : IUnifiedMemoryExtractor
         var results = await _runner.RunAsync(
             BuildSystemPrompt(
                 _options.AssistantContent, _options.EntityTypes, _options.TemporalValidity,
-                _options.Provenance, _options.CaptureIdentityAliases, _options.CaptureUserName, _options.IgnoreQuestions)
+                _options.Provenance, _options.CaptureIdentityAliases, _options.CaptureUserName, _options.IgnoreQuestions,
+                _options.OwnPreferencesOnly, _options.MarkCorrections)
                 // Appended only when context is actually present, so a context-free prompt stays
                 // byte-for-byte what every sealed measurement was taken under (E2).
                 + (window.HasContext ? ExtractionPromptSemantics.ExtractionContextInstruction : string.Empty),
             "Extract all supported memory from this conversation:",
+            // 36.1. The temporal instruction promises each turn its time; send it whenever that instruction is sent.
             ConversationTextBuilder.BuildWindow(
-                window, numbered: _options.Provenance == ExtractionProvenanceMode.PerItem),
+                window, numbered: _options.Provenance == ExtractionProvenanceMode.PerItem,
+                stamped: _options.TemporalValidity == TemporalValidityMode.Extract),
             response => new[] { Project(response) },
             cancellationToken,
             failOnParseExhaustion: true).ConfigureAwait(false);
@@ -99,10 +102,15 @@ internal sealed class LlmUnifiedMemoryExtractor : IUnifiedMemoryExtractor
                     Predicate = item.Predicate,
                     Object = item.Object,
                     Confidence = item.Confidence,
-                    ValidFrom = item.ValidFrom,
-                    ValidUntil = item.ValidUntil,
+                    ValidFrom = item.ValidFrom?.At,
+                    ValidFromPrecision = item.ValidFrom?.Precision ?? DatePrecision.Unspecified,
+                    ValidUntil = item.ValidUntil?.At,
+                    ValidUntilPrecision = item.ValidUntil?.Precision ?? DatePrecision.Unspecified,
+                    OccurredOn = item.OccurredOn?.At,
+                    OccurredOnPrecision = item.OccurredOn?.Precision ?? DatePrecision.Unspecified,
                     SourceRole = item.SourceRole,
                     SourceTurn = item.SourceTurn,
+                    Replaces = item.Replaces,
                 }).ToArray(),
             Preferences = (response.Preferences ?? [])
                 .Where(item => !string.IsNullOrWhiteSpace(item.Preference))
@@ -114,6 +122,7 @@ internal sealed class LlmUnifiedMemoryExtractor : IUnifiedMemoryExtractor
                     Confidence = item.Confidence,
                     SourceRole = item.SourceRole,
                     SourceTurn = item.SourceTurn,
+                    Replaces = item.Replaces,
                 }).ToArray(),
             Relationships = (response.Relations ?? [])
                 .Where(item => !string.IsNullOrWhiteSpace(item.Source) &&
@@ -177,7 +186,9 @@ internal sealed class LlmUnifiedMemoryExtractor : IUnifiedMemoryExtractor
         ExtractionProvenanceMode provenance,
         bool captureIdentityAliases = false,
         bool captureUserName = false,
-        bool ignoreQuestions = false)
+        bool ignoreQuestions = false,
+        bool ownPreferencesOnly = false,
+        bool markCorrections = false)
     {
         var types = entityTypes is { Count: > 0 } ? entityTypes : LlmEntityExtractor.DefaultEntityTypes;
         return SystemPromptPrefix
@@ -188,6 +199,8 @@ internal sealed class LlmUnifiedMemoryExtractor : IUnifiedMemoryExtractor
             + ExtractionPromptSemantics.ProvenanceInstruction(provenance)
             + ExtractionPromptSemantics.IdentityAliasInstruction(captureIdentityAliases)
             + ExtractionPromptSemantics.UserNameInstruction(captureUserName)
-            + ExtractionPromptSemantics.QuestionsInstruction(ignoreQuestions);
+            + ExtractionPromptSemantics.QuestionsInstruction(ignoreQuestions)
+            + ExtractionPromptSemantics.OwnPreferencesInstruction(ownPreferencesOnly)
+            + ExtractionPromptSemantics.CorrectionsInstruction(markCorrections);
     }
 }

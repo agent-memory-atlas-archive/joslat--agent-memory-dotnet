@@ -34,6 +34,22 @@ internal static class TemporalQueryParser
     private static readonly TimeSpan Timeout = TimeSpan.FromMilliseconds(100);
 
     /// <summary>
+    /// 36.1 (run 5). A question in the past tense: "what DID I do in October", "where WAS I in May", "back in March".
+    /// </summary>
+    private static readonly Regex PastTense = new(
+        @"\b(did|was|were|had|used\s+to|back\s+in|ago)\b",
+        Options, Timeout);
+
+    /// <summary>
+    /// 36.1 (review round 5). A question that points ahead despite a past-tense verb: "where did I say I'd BE in
+    /// October", "had I BOOKED anything in November", "what was PLANNED in October". Any of these keeps the month this
+    /// year's: a missed past reading recalls against now, which is safe; a wrong one hides this year's plan.
+    /// </summary>
+    private static readonly Regex AheadCue = new(
+        @"['\u2019]d\b|\b(will|would|going\s+to|plans?|planned|planning|booked|scheduled|coming\s+up|upcoming|due)\b",
+        Options, Timeout);
+
+    /// <summary>
     /// <c>last|past N unit(s) ago</c> and the bare <c>last week/month/quarter/year</c>.
     /// </summary>
     /// <remarks>
@@ -128,6 +144,14 @@ internal static class TemporalQueryParser
         {
             var monthNumber = MonthNumber(month.Groups["month"].Value);
             if (monthNumber == 0) return null;
+
+            // 36.1 (run 5). A month still ahead this year, named without a year, is last year's only when the question
+            // is about the past. "What do I have coming up in October?", asked in September, is about this October: read
+            // as last October it recalled what was true then and hid the appointment dated this October (found in
+            // simulated conversations, once extraction dated it). A future question recalls against now.
+            if (!month.Groups["year"].Success && monthNumber > now.Month &&
+                (!PastTense.IsMatch(query) || AheadCue.IsMatch(query)))
+                return null;
 
             var year = month.Groups["year"].Success
                 ? int.Parse(month.Groups["year"].Value, CultureInfo.InvariantCulture)

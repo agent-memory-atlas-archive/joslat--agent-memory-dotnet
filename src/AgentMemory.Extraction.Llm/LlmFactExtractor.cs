@@ -53,13 +53,15 @@ internal sealed class LlmFactExtractor : ExtractorBase<ExtractedFact>, IFactExtr
     protected override async Task<IReadOnlyList<ExtractedFact>> ExtractCoreWithContextAsync(
         ExtractionWindow window, CancellationToken cancellationToken)
     {
+        // 36.1. The temporal instruction promises each turn its time; send it whenever that instruction is sent.
         var conversationText = ConversationTextBuilder.BuildWindow(
-            window, numbered: _options.Provenance == ExtractionProvenanceMode.PerItem);
+            window, numbered: _options.Provenance == ExtractionProvenanceMode.PerItem,
+            stamped: _options.TemporalValidity == TemporalValidityMode.Extract);
         return await _runner.RunAsync(
             (_options.FactExtractionPrompt
                 ?? BuildSystemPrompt(
                     _options.AssistantContent, _options.TemporalValidity, _options.Provenance, _options.CaptureUserName,
-                    _options.IgnoreQuestions))
+                    _options.IgnoreQuestions, _options.MarkCorrections, _options.OwnPreferencesOnly))
                 // Only when context is present: a context-free prompt must stay byte-identical (E2).
                 + (window.HasContext ? ExtractionPromptSemantics.ExtractionContextInstruction : string.Empty),
             "Extract facts from this conversation:",
@@ -82,10 +84,15 @@ internal sealed class LlmFactExtractor : ExtractorBase<ExtractedFact>, IFactExtr
                 Predicate = f.Predicate,
                 Object = f.Object,
                 Confidence = f.Confidence,
-                ValidFrom = f.ValidFrom,
-                ValidUntil = f.ValidUntil,
+                ValidFrom = f.ValidFrom?.At,
+                ValidFromPrecision = f.ValidFrom?.Precision ?? DatePrecision.Unspecified,
+                ValidUntil = f.ValidUntil?.At,
+                ValidUntilPrecision = f.ValidUntil?.Precision ?? DatePrecision.Unspecified,
+                OccurredOn = f.OccurredOn?.At,
+                OccurredOnPrecision = f.OccurredOn?.Precision ?? DatePrecision.Unspecified,
                 SourceRole = f.SourceRole,
-                SourceTurn = f.SourceTurn
+                SourceTurn = f.SourceTurn,
+                Replaces = f.Replaces
             })
             .ToList();
     }
@@ -109,11 +116,15 @@ internal sealed class LlmFactExtractor : ExtractorBase<ExtractedFact>, IFactExtr
         TemporalValidityMode temporalValidity,
         ExtractionProvenanceMode provenance,
         bool captureUserName = false,
-        bool ignoreQuestions = false) =>
+        bool ignoreQuestions = false,
+        bool markCorrections = false,
+        bool ownPreferencesOnly = false) =>
         DefaultSystemPrompt
         + ExtractionPromptSemantics.AssistantContentInstruction(assistantContent)
         + ExtractionPromptSemantics.TemporalValidityInstruction(temporalValidity)
         + ExtractionPromptSemantics.ProvenanceInstruction(provenance)
         + ExtractionPromptSemantics.UserNameInstruction(captureUserName)
-        + ExtractionPromptSemantics.QuestionsInstruction(ignoreQuestions);
+        + ExtractionPromptSemantics.QuestionsInstruction(ignoreQuestions)
+        + ExtractionPromptSemantics.CorrectionsInstruction(markCorrections)
+        + ExtractionPromptSemantics.OwnPreferencesInstruction(ownPreferencesOnly);
 }

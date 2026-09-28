@@ -12,6 +12,7 @@ internal static class FusedPersistenceQueries
             MERGE (e:Entity {id: item.id})
             ON CREATE SET
                 e.owner_id           = item.owner_id,
+                e.owner_key          = coalesce(item.owner_id, '*'),
                 e.name               = item.name,
                 e.canonical_name     = item.canonical_name,
                 e.type               = item.type,
@@ -24,6 +25,7 @@ internal static class FusedPersistenceQueries
                 e.created_at         = datetime(item.created_at),
                 e.metadata           = item.metadata
             ON MATCH SET
+                e.owner_key          = coalesce(e.owner_key, coalesce(e.owner_id, '*')),
                 e.name               = item.name,
                 e.canonical_name     = item.canonical_name,
                 e.type               = item.type,
@@ -64,7 +66,11 @@ internal static class FusedPersistenceQueries
                 f.category           = item.category,
                 f.confidence         = item.confidence,
                 f.valid_from         = CASE WHEN item.valid_from IS NOT NULL THEN datetime(item.valid_from) ELSE null END,
+                f.valid_from_precision = CASE WHEN item.valid_from IS NOT NULL THEN item.valid_from_precision ELSE null END,
                 f.valid_until        = CASE WHEN item.valid_until IS NOT NULL THEN datetime(item.valid_until) ELSE null END,
+                f.valid_until_precision = CASE WHEN item.valid_until IS NOT NULL THEN item.valid_until_precision ELSE null END,
+                f.occurred_on        = CASE WHEN item.occurred_on IS NOT NULL THEN datetime(item.occurred_on) ELSE null END,
+                f.occurred_on_precision = CASE WHEN item.occurred_on IS NOT NULL THEN item.occurred_on_precision ELSE null END,
                 f.mention_count      = 1,
                 f.source_message_ids = item.source_message_ids,
                 f.created_at         = datetime(item.created_at),
@@ -80,7 +86,11 @@ internal static class FusedPersistenceQueries
                         ELSE coalesce(f.confidence, item.confidence) + $reinforceAlpha END
                     ELSE item.confidence END,
                 f.valid_from         = CASE WHEN item.valid_from IS NOT NULL THEN datetime(item.valid_from) ELSE f.valid_from END,
+                f.valid_from_precision = CASE WHEN item.valid_from IS NOT NULL THEN item.valid_from_precision ELSE f.valid_from_precision END,
                 f.valid_until        = CASE WHEN item.valid_until IS NOT NULL THEN datetime(item.valid_until) ELSE f.valid_until END,
+                f.valid_until_precision = CASE WHEN item.valid_until IS NOT NULL THEN item.valid_until_precision ELSE f.valid_until_precision END,
+                f.occurred_on        = CASE WHEN item.occurred_on IS NOT NULL THEN datetime(item.occurred_on) ELSE f.occurred_on END,
+                f.occurred_on_precision = CASE WHEN item.occurred_on IS NOT NULL THEN item.occurred_on_precision ELSE f.occurred_on_precision END,
                 f.mention_count      = coalesce(f.mention_count, 1) + 1,
                 f.source_message_ids = item.source_message_ids,
                 f.updated_at         = datetime(item.updated_at),

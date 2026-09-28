@@ -37,6 +37,17 @@ public sealed record RecallOptions
     /// <summary>Maximum entities to include.</summary>
     public int MaxEntities { get; init; } = 10;
 
+    /// <summary>
+    /// 36.7. Maximum relationships to include: the live relationships touching the recalled entities, rendered as
+    /// "Rosa, best friend, Carmen". 0 (the default) recalls none, as before.
+    /// </summary>
+    /// <remarks>
+    /// Relationships had no section in the recalled context at all, so "Carmen is my best friend", stored as a
+    /// relationship, never reached the agent (found in simulated conversations: "is she a colleague or a friend?").
+    /// Live recall only; the point-in-time path does not read relationships.
+    /// </remarks>
+    public int MaxRelationships { get; init; }
+
     /// <summary>Maximum preferences to include.</summary>
     public int MaxPreferences { get; init; } = 5;
 
@@ -83,6 +94,9 @@ public sealed record RecallOptions
     public int MaxGraphRagItems { get; init; } = 5;
 
     /// <summary>Minimum similarity score for semantic search (0.0 to 1.0).</summary>
+    /// <remarks>
+    /// On the store's scale: Neo4j's vector search scores <c>(1 + cosine) / 2</c>, in [0, 1], so 0.7 is a cosine of 0.40 and 0.55 a cosine of 0.10. A threshold remembered as a cosine is far stricter than the same number here.
+    /// </remarks>
     public double MinSimilarityScore { get; init; } = 0.7;
 
     /// <summary>

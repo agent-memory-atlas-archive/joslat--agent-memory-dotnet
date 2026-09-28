@@ -229,6 +229,37 @@ internal sealed partial class MemoryContextAssembler : IMemoryContextAssembler
     /// been without the feature, which is the correct failure direction for a meta-memory surface.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// 36.3. The shared budget this recall's vector searches ran under, or null when shared memory shares
+    /// the owner's budget. Asked of the service's own rule, so the searches, the fan-out merge and the
+    /// context's label cannot disagree about whether the split happened.
+    /// </summary>
+    /// <summary>
+    /// 36.7. The live relationships touching <paramref name="entities"/>. Best-effort, like every enrichment of a
+    /// recall: a store that cannot read them, or a read that fails, leaves the section empty, never the recall.
+    /// </summary>
+    private async Task<IReadOnlyList<RecalledRelationship>> RelationshipsAmongAsync(
+        IReadOnlyList<Entity> entities, int limit, MemoryScope? scope, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await TimedAsync("memory.recall.relationships", () => _longTerm.GetRelationshipsAmongAsync(
+                    entities.Select(entity => entity.EntityId).Distinct(StringComparer.Ordinal).ToList(),
+                    limit, _clock.UtcNow, scope, cancellationToken))
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (NotSupportedException) { return Array.Empty<RecalledRelationship>(); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Relationship recall failed; the context carries none.");
+            return Array.Empty<RecalledRelationship>();
+        }
+    }
+
+    private static int? SharedBudgetFor(MemoryScope? scope, int? sharedRecallBudget) =>
+        LongTermMemoryService.SplitsShared(sharedRecallBudget, scope) ? sharedRecallBudget : null;
+
     private async Task<IReadOnlyList<ForgottenTopicSummary>> ProbeForgottenAsync(
         RecallOptions recallOpts,
         float[]? queryEmbedding,
@@ -992,11 +1023,18 @@ internal sealed partial class MemoryContextAssembler : IMemoryContextAssembler
         if (forgottenTopics.Count > 0)
             projection = SuppressNoDirectMatch(projection, Projection.ProjectionSectionKeys.Facts);
 
+        // 36.7. How the recalled entities relate, from the entities that reach the prompt. Off unless asked for.
+        var relationships = recallOpts.MaxRelationships > 0 && entities.Count > 0
+            ? await RelationshipsAmongAsync(entities, recallOpts.MaxRelationships, scope, cancellationToken).ConfigureAwait(false)
+            : Array.Empty<RecalledRelationship>();
+
         var context = new MemoryContext
         {
             SessionId = request.SessionId,
             AssembledAtUtc = _clock.UtcNow,
             Projection = projection,
+            SeparatesSharedKnowledge = SharedBudgetFor(scope, _options.SharedRecallBudget) is not null,
+            RelevantRelationships = new MemoryContextSection<RecalledRelationship> { Items = relationships },
             WorkingMemoryBlock = workingMemory?.Text,
             WorkingMemoryBuiltAtUtc = workingMemory?.BuiltAtUtc,
             // 30.10. Null unless the planner ran at all -- see RecallFanOutReport's remarks: null,
@@ -1418,6 +1456,7 @@ internal sealed partial class MemoryContextAssembler : IMemoryContextAssembler
             SessionId = request.SessionId,
             AssembledAtUtc = _clock.UtcNow,
             Projection = projection,
+            SeparatesSharedKnowledge = SharedBudgetFor(scope, _options.SharedRecallBudget) is not null,
             // Design §5.5: the as-of path does not fan out. A caller who asked for it anyway is told
             // so -- a null here would read as "the planner never ran", which is true and unhelpful
             // when the caller explicitly requested something and got nothing.

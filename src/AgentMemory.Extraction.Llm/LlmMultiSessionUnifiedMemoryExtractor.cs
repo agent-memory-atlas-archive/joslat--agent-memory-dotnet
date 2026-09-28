@@ -55,7 +55,9 @@ internal sealed class LlmMultiSessionUnifiedMemoryExtractor : IMultiSessionUnifi
         ExtractionProvenanceMode provenance = ExtractionProvenanceMode.Batch,
         bool captureIdentityAliases = false,
         bool captureUserName = false,
-        bool ignoreQuestions = false)
+        bool ignoreQuestions = false,
+        bool ownPreferencesOnly = false,
+        bool markCorrections = false)
     {
         // Every shared instruction, appended in the same order every rung uses. A setting honoured by
         // only some extractors is worse than no setting - it makes behaviour depend on a performance
@@ -65,7 +67,9 @@ internal sealed class LlmMultiSessionUnifiedMemoryExtractor : IMultiSessionUnifi
             + ExtractionPromptSemantics.ProvenanceInstruction(provenance)
             + ExtractionPromptSemantics.IdentityAliasInstruction(captureIdentityAliases)
             + ExtractionPromptSemantics.UserNameInstruction(captureUserName)
-            + ExtractionPromptSemantics.QuestionsInstruction(ignoreQuestions);
+            + ExtractionPromptSemantics.QuestionsInstruction(ignoreQuestions)
+            + ExtractionPromptSemantics.OwnPreferencesInstruction(ownPreferencesOnly)
+            + ExtractionPromptSemantics.CorrectionsInstruction(markCorrections);
         var established = vocabulary?.Snapshot() ?? [];
         if (established.Count == 0)
             return SystemPrompt + assistant;
@@ -327,7 +331,7 @@ internal sealed class LlmMultiSessionUnifiedMemoryExtractor : IMultiSessionUnifi
             runner.RunAsync(
                 BuildSystemPrompt(
                     ActiveVocabulary, _options.AssistantContent, _options.TemporalValidity,
-                    _options.Provenance, _options.CaptureIdentityAliases, _options.CaptureUserName, _options.IgnoreQuestions),
+                    _options.Provenance, _options.CaptureIdentityAliases, _options.CaptureUserName, _options.IgnoreQuestions, _options.OwnPreferencesOnly, _options.MarkCorrections),
                 UserInstruction,
                 BuildBatchText(batch, _options.Provenance),
                 response => new[] { ProjectAndValidate(response, batch) },
@@ -465,10 +469,15 @@ internal sealed class LlmMultiSessionUnifiedMemoryExtractor : IMultiSessionUnifi
                     // setting was silently a no-op under multi-session extraction. That is precisely the
                     // "a setting only some extractors respect" defect ExtractionPromptSemantics exists to
                     // prevent, arriving through the projection instead of the prompt.
-                    ValidFrom = item.ValidFrom,
-                    ValidUntil = item.ValidUntil,
+                    ValidFrom = item.ValidFrom?.At,
+                    ValidFromPrecision = item.ValidFrom?.Precision ?? DatePrecision.Unspecified,
+                    ValidUntil = item.ValidUntil?.At,
+                    ValidUntilPrecision = item.ValidUntil?.Precision ?? DatePrecision.Unspecified,
+                    OccurredOn = item.OccurredOn?.At,
+                    OccurredOnPrecision = item.OccurredOn?.Precision ?? DatePrecision.Unspecified,
                     SourceRole = item.SourceRole,
                     SourceTurn = item.SourceTurn,
+                    Replaces = item.Replaces,
                 });
         }
         foreach (var item in response.Preferences ?? [])
@@ -483,6 +492,7 @@ internal sealed class LlmMultiSessionUnifiedMemoryExtractor : IMultiSessionUnifi
                     Confidence = item.Confidence,
                     SourceRole = item.SourceRole,
                     SourceTurn = item.SourceTurn,
+                    Replaces = item.Replaces,
                 });
         }
         foreach (var item in response.Relations ?? [])
@@ -549,7 +559,7 @@ internal sealed class LlmMultiSessionUnifiedMemoryExtractor : IMultiSessionUnifi
             // under-estimates by exactly the instruction it forgot.
             Encoding.UTF8.GetByteCount(BuildSystemPrompt(
                 ActiveVocabulary, _options.AssistantContent, _options.TemporalValidity,
-                _options.Provenance, _options.CaptureIdentityAliases, _options.CaptureUserName, _options.IgnoreQuestions)) +
+                _options.Provenance, _options.CaptureIdentityAliases, _options.CaptureUserName, _options.IgnoreQuestions, _options.OwnPreferencesOnly, _options.MarkCorrections)) +
             Encoding.UTF8.GetByteCount(UserInstruction) +
             Encoding.UTF8.GetByteCount(BuildBatchText(batch, _options.Provenance)) +
             35);
@@ -575,7 +585,7 @@ internal sealed class LlmMultiSessionUnifiedMemoryExtractor : IMultiSessionUnifi
                     builder.Append('[')
                         .Append((turn + 1).ToString(CultureInfo.InvariantCulture))
                         .Append("] ");
-                builder.Append('[').Append(message.TimestampUtc.ToString("O")).Append("] ")
+                builder.Append(AgentMemory.Core.Extraction.ConversationTextBuilder.Stamp(message))
                     .Append(message.Role).Append(": ").AppendLine(message.Content);
             }
             builder.AppendLine("</source_session>");

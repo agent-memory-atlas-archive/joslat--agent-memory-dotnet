@@ -100,6 +100,10 @@ internal sealed partial class Neo4jFactRepository : IFactRepository, IUpsertPers
                 ["reinforceAlpha"] = _reinforceAlpha,
                 ["validFrom"] = (object?)(fact.ValidFrom?.ToString("O")),
                 ["validUntil"] = (object?)(fact.ValidUntil?.ToString("O")),
+                ["validFromPrecision"] = DatePrecisionProperty.ToStored(fact.ValidFromPrecision),
+                ["validUntilPrecision"] = DatePrecisionProperty.ToStored(fact.ValidUntilPrecision),
+                ["occurredOn"] = (object?)(fact.OccurredOn?.ToString("O")),
+                ["occurredOnPrecision"] = DatePrecisionProperty.ToStored(fact.OccurredOnPrecision),
                 ["sourceMessageIds"] = fact.SourceMessageIds.ToList(),
                 ["createdAtUtc"] = fact.CreatedAtUtc.ToString("O"),
                 ["updatedAtUtc"] = DateTimeOffset.UtcNow.ToString("O"),
@@ -186,6 +190,10 @@ internal sealed partial class Neo4jFactRepository : IFactRepository, IUpsertPers
             ["confidence"] = f.Confidence,
             ["valid_from"] = (object?)(f.ValidFrom?.ToString("O")),
             ["valid_until"] = (object?)(f.ValidUntil?.ToString("O")),
+            ["valid_from_precision"] = DatePrecisionProperty.ToStored(f.ValidFromPrecision),
+            ["valid_until_precision"] = DatePrecisionProperty.ToStored(f.ValidUntilPrecision),
+            ["occurred_on"] = (object?)(f.OccurredOn?.ToString("O")),
+            ["occurred_on_precision"] = DatePrecisionProperty.ToStored(f.OccurredOnPrecision),
             ["source_message_ids"] = f.SourceMessageIds.ToList(),
             ["created_at"] = f.CreatedAtUtc.ToString("O"),
             ["updated_at"] = updatedAt,
@@ -277,8 +285,11 @@ internal sealed partial class Neo4jFactRepository : IFactRepository, IUpsertPers
         {
             ["winnerId"]     = winnerFactId,
             ["subjectKey"]   = MemoryTripleCanonicalizer.CanonicalValue(subject),
-            ["predicateKey"] = MemoryTripleCanonicalizer.Canonical(predicate),
+            // 36.4. Every stored form of the relation, not only this predicate's own key: "works for" replaces a
+            // fact stored as "works at", and "lives in" one stored as "lived in".
+            ["predicateKeys"] = MemoryRelationCardinality.ReplacedKeys(predicate).ToList(),
             ["objectKey"]    = MemoryTripleCanonicalizer.CanonicalValue(@object),
+            ["now"]          = DateTimeOffset.UtcNow.ToString("O"),
         };
         if (hasOwner) parameters["ownerId"] = scope!.OwnerId;
 
@@ -709,6 +720,12 @@ internal sealed partial class Neo4jFactRepository : IFactRepository, IUpsertPers
             ValidUntil = properties.TryGetValue("valid_until", out var vu)
                                 ? Neo4jDateTimeHelper.ReadNullableDateTimeOffset(vu)
                                 : null,
+            ValidFromPrecision = DatePrecisionProperty.Read(properties, "valid_from_precision"),
+            ValidUntilPrecision = DatePrecisionProperty.Read(properties, "valid_until_precision"),
+            OccurredOn = properties.TryGetValue("occurred_on", out var occurred)
+                                ? Neo4jDateTimeHelper.ReadNullableDateTimeOffset(occurred)
+                                : null,
+            OccurredOnPrecision = DatePrecisionProperty.Read(properties, "occurred_on_precision"),
             InvalidatedAtUtc = properties.TryGetValue("invalidated_at", out var iat)
                                 ? Neo4jDateTimeHelper.ReadNullableDateTimeOffset(iat)
                                 : null,
@@ -1128,7 +1145,11 @@ internal sealed partial class Neo4jFactRepository : IFactRepository, IUpsertPers
                             : null,
                         entry.TryGetValue("valid_until", out var vu)
                             ? Neo4jDateTimeHelper.ReadNullableDateTimeOffset(vu)
-                            : null))
+                            : null)
+                    {
+                        ValidUntilPrecision = DatePrecisionProperty.FromStored(
+                            entry.TryGetValue("valid_until_precision", out var vup) ? vup as string : null),
+                    })
                     .ToList();
 
                 if (chain.Count > 0) result[factId] = chain;

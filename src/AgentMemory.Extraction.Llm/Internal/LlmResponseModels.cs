@@ -50,13 +50,19 @@ internal sealed class LlmFactDto
     // Read leniently (PeriodDateConverter): "2026-08" is a legitimate ISO-8601 month that the native
     // parser rejects, and rejecting it used to discard the WHOLE response. A month or year means the
     // start of the period for valid_from and the end of it for valid_until, always in UTC.
+    // 36.1: read with the precision it was written at, so "2024-03" is not later rendered as a day.
     [JsonPropertyName("valid_from")]
     [JsonConverter(typeof(PeriodStartDateConverter))]
-    public DateTimeOffset? ValidFrom { get; set; }
+    public PeriodDate? ValidFrom { get; set; }
 
     [JsonPropertyName("valid_until")]
     [JsonConverter(typeof(PeriodEndDateConverter))]
-    public DateTimeOffset? ValidUntil { get; set; }
+    public PeriodDate? ValidUntil { get; set; }
+
+    // 36.1. The day a one-off event happened. Null unless TemporalValidityMode.Extract asked for it.
+    [JsonPropertyName("occurred_on")]
+    [JsonConverter(typeof(OccurredOnDateConverter))]
+    public PeriodDate? OccurredOn { get; set; }
 
     // Which turn stated this. Null unless AssistantContentMode asked for it, and null is meaningful:
     // it leaves the request's own trust level applying, exactly as before this field existed.
@@ -66,6 +72,10 @@ internal sealed class LlmFactDto
     // Which numbered turn stated it. Null unless ExtractionProvenanceMode.PerItem asked for it.
     [JsonPropertyName("source_turn")]
     public int? SourceTurn { get; set; }
+
+    // 36.4. The earlier value this corrects ("not Radiohead"). Null unless MarkCorrections asked for it.
+    [JsonPropertyName("replaces")]
+    public string? Replaces { get; set; }
 }
 
 internal sealed class LlmPreferenceDto
@@ -88,6 +98,10 @@ internal sealed class LlmPreferenceDto
     /// <inheritdoc cref="LlmFactDto.SourceRole"/>
     [JsonPropertyName("source_role")]
     public string? SourceRole { get; set; }
+
+    /// <summary>36.4: the earlier value this corrects ("not Radiohead"), when MarkCorrections asked for it.</summary>
+    [JsonPropertyName("replaces")]
+    public string? Replaces { get; set; }
 
     /// <inheritdoc cref="LlmFactDto.SourceTurn"/>
     [JsonPropertyName("source_turn")]

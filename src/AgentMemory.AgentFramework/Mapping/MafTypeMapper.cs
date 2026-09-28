@@ -6,6 +6,7 @@ using AgentMemory.Abstractions.Options;
 using AgentMemory.Abstractions.Services;
 using AgentMemory.AgentFramework.Security;
 using AgentMemory.Core.Security;
+using AgentMemory.Core.Services;
 using AgentMemory.Core.Services.Projection;
 
 namespace AgentMemory.AgentFramework.Mapping;
@@ -189,6 +190,15 @@ internal static class MafTypeMapper
         // Joined with ": " and not an arrow, because every admitted block is HTML-escaped (#92 Phase 1):
         // a "->" separator renders to the model as "-&gt;". Matching the format MemoryQueryFacade already
         // uses for a trace ("task: outcome") keeps one shape across both surfaces.
+        static string DescribeEntity(Entity e) =>
+            string.IsNullOrEmpty(e.Description) ? $"{e.Name} ({e.Type})" : $"{e.Name} ({e.Type}): {e.Description}";
+
+        // 30.6: one renderer, both surfaces. Ordinary facts render byte-identically to before. 36.1: with
+        // IncludeDates, the fact's validity at the precision it was stated (one rule, FactDates).
+        string DescribeFact(Fact f) =>
+            AgentMemory.Core.Services.DerivedFactRenderer.Append($"{f.Subject} {f.Predicate} {f.Object}", f)
+            + (options.IncludeDates ? FactDates.Suffix(f) : string.Empty);
+
         string DescribeTrace(ReasoningTrace trace) =>
             options.IncludeTraceOutcomes && !string.IsNullOrWhiteSpace(trace.Outcome)
                 ? $"{trace.Task}: {trace.Outcome}"
@@ -243,7 +253,12 @@ internal static class MafTypeMapper
             .Select((x, recallIndex) => (Chat: ToChatMessage(x.Message with
             {
                 Role = RecalledMessageRoleGate.EffectiveRole(
-                    x.Message.Role, x.TrustLevel, options.MinimumTrustForSystemRole)
+                    x.Message.Role, x.TrustLevel, options.MinimumTrustForSystemRole),
+                // 36.1. A turn from another session says which day it was said, so its "yesterday" can be
+                // resolved; this session's own turns need no date.
+                Content = options.IncludeDates && !string.Equals(x.Message.SessionId, context.SessionId, StringComparison.Ordinal)
+                    ? FactDates.MessagePrefix(x.Message.TimestampUtc) + x.Message.Content
+                    : x.Message.Content,
             }), At: x.Message.TimestampUtc, RecallIndex: recallIndex))
             .ToList();
 
@@ -276,7 +291,7 @@ internal static class MafTypeMapper
             memory.AddRange(CategoryMessages("due", context.DueFacts.Items,
                 f => $"{f.Subject} {f.Predicate} {f.Object}"
                     + (f.ValidFrom is { } from
-                        ? $" (valid from {from.UtcDateTime:yyyy-MM-dd})"
+                        ? $" (valid from {FactDates.Format(from, f.ValidFromPrecision)})"
                         : string.Empty),
                 f => f.Metadata.GetTrustLevel(), "Due now: ", "; "));
 
@@ -284,7 +299,7 @@ internal static class MafTypeMapper
             memory.AddRange(CategoryMessages("expiring", context.ExpiringFacts.Items,
                 f => $"{f.Subject} {f.Predicate} {f.Object}"
                     + (f.ValidUntil is { } until
-                        ? $" (until {until.UtcDateTime:yyyy-MM-dd})"
+                        ? $" (until {FactDates.Format(until, f.ValidUntilPrecision)})"
                         : string.Empty),
                 f => f.Metadata.GetTrustLevel(), "Expiring soon: ", "; "));
 
@@ -297,21 +312,49 @@ internal static class MafTypeMapper
                 _ => MemoryTrustLevel.Untrusted,
                 "No longer known (aged out, details unavailable): ", "; "));
 
-        if (options.IncludeEntities && context.RelevantEntities.Items.Count > 0)
-            memory.AddRange(CategoryMessages("entities", context.RelevantEntities.Items,
-                e => string.IsNullOrEmpty(e.Description) ? $"{e.Name} ({e.Type})" : $"{e.Name} ({e.Type}): {e.Description}",
+        // 36.3. With shared memory recalled under its own budget, the owner-less items render after the
+        // person's own under a label that says what they are. Without it both lists are the section as
+        // before (Shared is empty), so the messages are byte-identical.
+        var (ownEntities, sharedEntities) = SharedKnowledge.Split(context, context.RelevantEntities.Items, e => e.OwnerId);
+        var (ownFacts, sharedFacts) = SharedKnowledge.Split(
+            context, ProjectionRenderer.Reorder("facts", context.RelevantFacts.Items, f => f.FactId, context.Projection), f => f.OwnerId);
+        var (ownPreferences, sharedPreferences) = SharedKnowledge.Split(context, context.RelevantPreferences.Items, p => p.OwnerId);
+
+        // 36.7. How the recalled people and things relate. Empty unless RecallOptions.MaxRelationships asked for it.
+        var (ownRelationships, sharedRelationships) = SharedKnowledge.Split(
+            context, context.RelevantRelationships.Items, r => r.Relationship.OwnerId);
+
+        if (options.IncludeEntities && ownEntities.Count > 0)
+            memory.AddRange(CategoryMessages("entities", ownEntities, DescribeEntity,
                 e => e.Metadata.GetTrustLevel(), "Relevant entities: ", ", ", e => e.EntityId));
 
-        if (options.IncludeFacts && context.RelevantFacts.Items.Count > 0)
-            memory.AddRange(CategoryMessages("facts", ProjectionRenderer.Reorder("facts", context.RelevantFacts.Items, f => f.FactId, context.Projection),
-                // 30.6: one renderer, both surfaces. Ordinary facts render byte-identically to before.
-                f => AgentMemory.Core.Services.DerivedFactRenderer.Append(
-                    $"{f.Subject} {f.Predicate} {f.Object}", f),
+        if (options.IncludeFacts && ownFacts.Count > 0)
+            memory.AddRange(CategoryMessages("facts", ownFacts, DescribeFact,
                 f => f.Metadata.GetTrustLevel(), "Known facts: ", "; ", f => f.FactId));
 
-        if (options.IncludePreferences && context.RelevantPreferences.Items.Count > 0)
-            memory.AddRange(CategoryMessages("preferences", context.RelevantPreferences.Items, p => p.PreferenceText,
+        if (options.IncludePreferences && ownPreferences.Count > 0)
+            memory.AddRange(CategoryMessages("preferences", ownPreferences, p => p.PreferenceText,
                 p => p.Metadata.GetTrustLevel(), "User preferences: ", "; ", p => p.PreferenceId));
+
+        if (options.IncludeEntities && ownRelationships.Count > 0)
+            memory.AddRange(CategoryMessages("relationships", ownRelationships, SharedKnowledge.Describe,
+                r => r.Relationship.Metadata.GetTrustLevel(), "Relationships: ", "; ", r => r.Relationship.RelationshipId));
+
+        if (options.IncludeEntities && sharedEntities.Count > 0)
+            memory.AddRange(CategoryMessages("entities", sharedEntities, DescribeEntity,
+                e => e.Metadata.GetTrustLevel(), $"Entities ({SharedKnowledge.Label}): ", ", ", e => e.EntityId));
+
+        if (options.IncludeFacts && sharedFacts.Count > 0)
+            memory.AddRange(CategoryMessages("facts", sharedFacts, DescribeFact,
+                f => f.Metadata.GetTrustLevel(), $"Facts ({SharedKnowledge.Label}): ", "; ", f => f.FactId));
+
+        if (options.IncludePreferences && sharedPreferences.Count > 0)
+            memory.AddRange(CategoryMessages("preferences", sharedPreferences, p => p.PreferenceText,
+                p => p.Metadata.GetTrustLevel(), $"Preferences ({SharedKnowledge.Label}): ", "; ", p => p.PreferenceId));
+
+        if (options.IncludeEntities && sharedRelationships.Count > 0)
+            memory.AddRange(CategoryMessages("relationships", sharedRelationships, SharedKnowledge.Describe,
+                r => r.Relationship.Metadata.GetTrustLevel(), $"Relationships ({SharedKnowledge.Label}): ", "; ", r => r.Relationship.RelationshipId));
 
         // A trace's Task is what was attempted; its Outcome is what happened -- and on a REPEATED task
         // the Task text is something the agent already has, so rendering it alone tells the model it has

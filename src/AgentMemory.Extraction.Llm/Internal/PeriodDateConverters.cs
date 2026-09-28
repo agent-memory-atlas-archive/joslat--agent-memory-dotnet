@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using AgentMemory.Abstractions.Domain;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -12,12 +13,18 @@ namespace AgentMemory.Extraction.Llm.Internal;
 /// </summary>
 internal sealed class PeriodStartDateConverter() : PeriodDateConverter(PeriodEdge.Start, "valid_from");
 
+/// <summary>Reads the day an event happened (36.1), as the start of the period written: <c>"2026-09"</c> → 1 September.</summary>
+internal sealed class OccurredOnDateConverter() : PeriodDateConverter(PeriodEdge.Start, "occurred_on");
+
 /// <summary>
 /// Reads a model-written validity date into the last instant of the period it names:
 /// <c>"2026"</c> → 2026-12-31T23:59:59.9999999Z, <c>"2026-08"</c> → 2026-08-31T23:59:59.9999999Z,
 /// <c>"2026-08-15"</c> → 2026-08-15T23:59:59.9999999Z ("valid until Friday" includes Friday).
 /// </summary>
 internal sealed class PeriodEndDateConverter() : PeriodDateConverter(PeriodEdge.End, "valid_until");
+
+/// <summary>A validity date as read, with how precisely it was written (36.1).</summary>
+internal readonly record struct PeriodDate(DateTimeOffset At, DatePrecision Precision);
 
 internal enum PeriodEdge
 {
@@ -55,21 +62,21 @@ internal enum PeriodEdge
 /// <c>memory.extract.date_dropped</c> event on the current activity so it stays diagnosable.
 /// </para>
 /// </remarks>
-internal abstract partial class PeriodDateConverter(PeriodEdge edge, string field) : JsonConverter<DateTimeOffset?>
+internal abstract partial class PeriodDateConverter(PeriodEdge edge, string field) : JsonConverter<PeriodDate?>
 {
     public override bool HandleNull => true;
 
-    public override DateTimeOffset? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    public override PeriodDate? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         switch (reader.TokenType)
         {
             case JsonTokenType.Null:
                 return null;
             case JsonTokenType.String:
-                return Parse(reader.GetString(), edge, field);
+                return ParseWithPrecision(reader.GetString(), edge, field);
             case JsonTokenType.Number when reader.TryGetInt32(out var year):
                 // A bare year written as a number ("valid_from": 2024).
-                return Parse(year.ToString(CultureInfo.InvariantCulture), edge, field);
+                return ParseWithPrecision(year.ToString(CultureInfo.InvariantCulture), edge, field);
             default:
                 reader.Skip();
                 Dropped(field, "unsupported_token");
@@ -77,16 +84,24 @@ internal abstract partial class PeriodDateConverter(PeriodEdge edge, string fiel
         }
     }
 
-    public override void Write(Utf8JsonWriter writer, DateTimeOffset? value, JsonSerializerOptions options)
+    public override void Write(Utf8JsonWriter writer, PeriodDate? value, JsonSerializerOptions options)
     {
         if (value is { } v)
-            writer.WriteStringValue(v);
+            writer.WriteStringValue(v.At);
         else
             writer.WriteNullValue();
     }
 
     /// <summary>Parses one validity value; null when the value is absent, a sentinel, or unreadable. Never throws.</summary>
-    internal static DateTimeOffset? Parse(string? raw, PeriodEdge edge, string field = "date")
+    internal static DateTimeOffset? Parse(string? raw, PeriodEdge edge, string field = "date") =>
+        ParseWithPrecision(raw, edge, field)?.At;
+
+    /// <summary>
+    /// 36.1. <see cref="Parse"/>, keeping how precisely the value was written: "2024" a year, "2024-03" a month,
+    /// "2024-03-12" a day, a value with a time of day an instant. Only the parser can tell; the instant it
+    /// returns cannot ("2024-03" and "2024-03-01" start at the same instant).
+    /// </summary>
+    internal static PeriodDate? ParseWithPrecision(string? raw, PeriodEdge edge, string field = "date")
     {
         try
         {
@@ -100,7 +115,7 @@ internal abstract partial class PeriodDateConverter(PeriodEdge edge, string fiel
         }
     }
 
-    private static DateTimeOffset? ParseCore(string? raw, PeriodEdge edge, string field)
+    private static PeriodDate? ParseCore(string? raw, PeriodEdge edge, string field)
     {
         var text = raw?.Trim();
         if (string.IsNullOrEmpty(text) || IsSentinel(text))
@@ -127,8 +142,11 @@ internal abstract partial class PeriodDateConverter(PeriodEdge edge, string fiel
             }
 
             var start = new DateTimeOffset(year, month ?? 1, day ?? 1, 0, 0, 0, TimeSpan.Zero);
+            var precision = day is not null ? DatePrecision.Day
+                : month is not null ? DatePrecision.Month
+                : DatePrecision.Year;
             if (edge == PeriodEdge.Start)
-                return start;
+                return new PeriodDate(start, precision);
 
             // Last instant of the period: the next period's start, one tick back. The last period
             // of year 9999 has no successor, so it ends at MaxValue.
@@ -137,11 +155,11 @@ internal abstract partial class PeriodDateConverter(PeriodEdge edge, string fiel
                 var next = day is not null ? start.AddDays(1)
                     : month is not null ? start.AddMonths(1)
                     : start.AddYears(1);
-                return next.AddTicks(-1);
+                return new PeriodDate(next.AddTicks(-1), precision);
             }
             catch (ArgumentOutOfRangeException)
             {
-                return DateTimeOffset.MaxValue;
+                return new PeriodDate(DateTimeOffset.MaxValue, precision);
             }
         }
 
@@ -177,7 +195,11 @@ internal abstract partial class PeriodDateConverter(PeriodEdge edge, string fiel
                 Dropped(field, "ambiguous_precision");
                 return null;
             }
-            return instant.ToUniversalTime();
+            // Free text with a time of day names an instant; without one it cannot say how long a period it names
+            // ("August 2026" and "1 August 2026" parse alike), so its precision is not recorded.
+            return new PeriodDate(
+                instant.ToUniversalTime(),
+                text.Contains(':', StringComparison.Ordinal) ? DatePrecision.Instant : DatePrecision.Unspecified);
         }
 
         Dropped(field, "unparseable");

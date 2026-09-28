@@ -73,29 +73,49 @@ internal static class MemoryContextFormatter
         AppendCategory(sb, "due", "### Due Now", ctx.DueFacts.Items,
             f => $"- DUE: {f.Subject} {f.Predicate} {f.Object}"
                 + (f.ValidFrom is { } from
-                    ? $" (valid from {from.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)})"
+                    ? $" (valid from {FactDates.Format(from, f.ValidFromPrecision)})"
                     : string.Empty),
             f => f.Metadata.GetTrustLevel(), opts, logger);
         AppendCategory(sb, "expiring", "### Expiring Soon", ctx.ExpiringFacts.Items,
             f => $"- EXPIRING: {f.Subject} {f.Predicate} {f.Object}"
                 + (f.ValidUntil is { } until
-                    ? $" (until {until.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)})"
+                    ? $" (until {FactDates.Format(until, f.ValidUntilPrecision)})"
                     : string.Empty),
             f => f.Metadata.GetTrustLevel(), opts, logger);
 
         if (graphFirst) AppendGraphRag(sb, ctx.GraphRagContext, opts, logger);
-        AppendMessages(sb, "### Recent Messages", ctx.RecentMessages, opts, logger);
-        AppendMessages(sb, "### Relevant Past Messages", ctx.RelevantMessages, opts, logger);
-        AppendCategory(sb, "entities", "### Known Entities", ctx.RelevantEntities.Items,
-            e => string.IsNullOrWhiteSpace(e.Description) ? $"- {e.Name} ({e.Type})" : $"- {e.Name} ({e.Type}) — {e.Description}",
+        AppendMessages(sb, "### Recent Messages", ctx.RecentMessages, ctx.SessionId, opts, logger);
+        AppendMessages(sb, "### Relevant Past Messages", ctx.RelevantMessages, ctx.SessionId, opts, logger);
+        // 36.3. The person's own items under the usual headings; shared ones (only when the recall separated
+        // them) under their own, after. Without the flag Shared is empty and nothing changes.
+        var (ownEntities, sharedEntities) = SharedKnowledge.Split(ctx, ctx.RelevantEntities.Items, e => e.OwnerId);
+        var (ownFacts, sharedFacts) = SharedKnowledge.Split(
+            ctx, ProjectionRenderer.Reorder("facts", ctx.RelevantFacts.Items, f => f.FactId, projection), f => f.OwnerId);
+        var (ownPreferences, sharedPreferences) = SharedKnowledge.Split(ctx, ctx.RelevantPreferences.Items, p => p.OwnerId);
+        AppendCategory(sb, "entities", "### Known Entities", ownEntities, DescribeEntity,
             e => e.Metadata.GetTrustLevel(), opts, logger, projection, e => e.EntityId);
-        AppendCategory(sb, "facts", "### Known Facts",
-            ProjectionRenderer.Reorder("facts", ctx.RelevantFacts.Items, f => f.FactId, projection),
-            f => DerivedFactRenderer.Append($"- {f.Subject} {f.Predicate} {f.Object}", f),
+        string DescribeFact(Fact f) => MemoryContextFormatter.DescribeFact(f) + (opts.IncludeDates ? FactDates.Suffix(f) : string.Empty);
+        AppendCategory(sb, "facts", "### Known Facts", ownFacts, DescribeFact,
             f => f.Metadata.GetTrustLevel(), opts, logger, projection, f => f.FactId);
-        AppendCategory(sb, "preferences", "### User Preferences", ctx.RelevantPreferences.Items,
-            p => $"- [{p.Category}] {p.PreferenceText}",
+        AppendCategory(sb, "preferences", "### User Preferences", ownPreferences, DescribePreference,
             p => p.Metadata.GetTrustLevel(), opts, logger, projection, p => p.PreferenceId);
+        var (ownRelationships, sharedRelationships) = SharedKnowledge.Split(ctx, ctx.RelevantRelationships.Items, r => r.Relationship.OwnerId);
+        AppendCategory(sb, "relationships", "### Relationships", ownRelationships, r => "- " + SharedKnowledge.Describe(r),
+            r => r.Relationship.Metadata.GetTrustLevel(), opts, logger, projection, r => r.Relationship.RelationshipId);
+        // A section's preamble ("nothing here matched", a conflict) belongs to the person's own section and is said
+        // once; shared items keep their own annotations; an empty shared section is not rendered at all.
+        if (sharedEntities.Count > 0)
+            AppendCategory(sb, "entities", $"### Entities ({SharedKnowledge.Label})", sharedEntities, DescribeEntity,
+                e => e.Metadata.GetTrustLevel(), opts, logger, projection, e => e.EntityId, withPreamble: false);
+        if (sharedFacts.Count > 0)
+            AppendCategory(sb, "facts", $"### Facts ({SharedKnowledge.Label})", sharedFacts, DescribeFact,
+                f => f.Metadata.GetTrustLevel(), opts, logger, projection, f => f.FactId, withPreamble: false);
+        if (sharedPreferences.Count > 0)
+            AppendCategory(sb, "preferences", $"### Preferences ({SharedKnowledge.Label})", sharedPreferences, DescribePreference,
+                p => p.Metadata.GetTrustLevel(), opts, logger, projection, p => p.PreferenceId, withPreamble: false);
+        if (sharedRelationships.Count > 0)
+            AppendCategory(sb, "relationships", $"### Relationships ({SharedKnowledge.Label})", sharedRelationships, r => "- " + SharedKnowledge.Describe(r),
+                r => r.Relationship.Metadata.GetTrustLevel(), opts, logger, projection, r => r.Relationship.RelationshipId, withPreamble: false);
         // Procedural memory was invisible on this formatter, and therefore invisible to Semantic
         // Kernel and to every consumer using Core directly -- while a trace vector search ran on each
         // recall and its results were counted into TotalItemsRetrieved. The tier shipped, was tested
@@ -179,8 +199,8 @@ internal static class MemoryContextFormatter
     // here, not a separately-injected memory block; wrapping it in visible tags would make ordinary replayed
     // chat history look bizarre for little added security value once the role itself is gated.
     private static void AppendMessages(
-        StringBuilder sb, string heading, MemoryContextSection<Message> section, MemoryContextFormatterOptions opts,
-        ILogger? logger)
+        StringBuilder sb, string heading, MemoryContextSection<Message> section, string sessionId,
+        MemoryContextFormatterOptions opts, ILogger? logger)
     {
         if (section.Items.Count == 0) return;
         var lines = new List<string>();
@@ -190,7 +210,11 @@ internal static class MemoryContextFormatter
             if (!Admit("messages", msg.Content, trustLevel, opts, logger)) continue;
             var effectiveRole = RecalledMessageRoleGate.EffectiveRole(
                 msg.Role, trustLevel, opts.MinimumTrustForSystemRole);
-            lines.Add($"[{effectiveRole}]: {msg.Content}");
+            // 36.1. A turn from another session says which day it was said; this session's turns need no date.
+            var said = opts.IncludeDates && !string.Equals(msg.SessionId, sessionId, StringComparison.Ordinal)
+                ? FactDates.MessagePrefix(msg.TimestampUtc)
+                : string.Empty;
+            lines.Add($"{said}[{effectiveRole}]: {msg.Content}");
         }
         if (lines.Count == 0) return;
         sb.AppendLine(heading);
@@ -202,13 +226,20 @@ internal static class MemoryContextFormatter
     // heading-prefixed block -- mirroring AgentMemory.AgentFramework.Mapping.MafTypeMapper's generic
     // CategoryMessages<T> helper for the same three categories, instead of three near-identical
     // hand-written loops that could silently drift apart.
+    private static string DescribeEntity(Entity e) =>
+        string.IsNullOrWhiteSpace(e.Description) ? $"- {e.Name} ({e.Type})" : $"- {e.Name} ({e.Type}) — {e.Description}";
+
+    private static string DescribeFact(Fact f) => DerivedFactRenderer.Append($"- {f.Subject} {f.Predicate} {f.Object}", f);
+
+    private static string DescribePreference(Preference p) => $"- [{p.Category}] {p.PreferenceText}";
+
     private static void AppendCategory<T>(
         StringBuilder sb, string category, string heading, IReadOnlyList<T> items,
         Func<T, string> describe, Func<T, MemoryTrustLevel> getTrustLevel,
         MemoryContextFormatterOptions opts, ILogger? logger,
-        ProjectedContext? projection = null, Func<T, string>? idOf = null)
+        ProjectedContext? projection = null, Func<T, string>? idOf = null, bool withPreamble = true)
     {
-        var preamble = ProjectionRenderer.SectionPreamble(category, projection);
+        var preamble = withPreamble ? ProjectionRenderer.SectionPreamble(category, projection) : null;
         // A section can be empty of items and still have something to say -- "nothing here matched" is
         // exactly the case where there are no items worth rendering.
         if (items.Count == 0 && preamble is null) return;

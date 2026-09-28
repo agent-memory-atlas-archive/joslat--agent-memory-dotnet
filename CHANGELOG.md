@@ -8,6 +8,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SupersededFact.ValidUntilPrecision`** (and `EffectiveDatePrecision`), so a predecessor's end prints at the
+  precision it was stated.
+
+- **`RecallOptions.MaxRelationships`: how the recalled people and things relate reaches the agent.** The live
+  relationships touching the recalled entities are read in one query (`IRelationshipRepository.GetLiveAmongAsync`,
+  `ILongTermMemoryService.GetRelationshipsAmongAsync`, both names included, as `RecalledRelationship`) and rendered
+  by both renderers as `Rosa — best friend → Carmen` (`MemoryContext.RelevantRelationships`; shared ones labelled like
+  every shared item). Relationships had no section in the recalled context at all, so "Carmen is my best friend",
+  stored as a relationship, never reached the agent ("is she a colleague or a friend?"). 0 (the default) reads none.
+  Live recall only: an edge has no transaction clock to reconstruct a past instant with.
+- **`IRelationshipRepository.EndAsync`**: ends a relationship by setting its `valid_until` (the first end is kept;
+  the edge stays for history). New members have default implementations that throw `NotSupportedException`.
+
+- **`LlmExtractionOptions.MarkCorrections`: a correction closes what it replaces.** Every extractor is asked to mark
+  what a correction replaces ("actually Arcade Fire, not Radiohead" adds `"replaces": "Radiohead"`;
+  `ExtractedFact.Replaces` / `ExtractedPreference.Replaces`), and with `SupersedeReplacedFacts` the write closes the
+  live fact or preference that stated it: a fact of the same subject whose object is the replaced value, or states
+  the same relation and contains it as whole words; a preference of the same category that names it. Preferences had
+  no supersession at all, and a plan ("the full marathon instead of the half") has no single-valued relation, so both
+  values stayed live. Off (the default) every prompt is byte-for-byte what it was.
+- **`Preference.InvalidatedAtUtc`**, projected as it is on `Fact`, so a caller can tell a superseded preference from a
+  live one.
+
+- **An event carries the day it happened (`Fact.OccurredOn` / `OccurredOnPrecision`, stored as `occurred_on` /
+  `occurred_on_precision`).** Under `TemporalValidityMode.Extract` the extractor is asked to give a one-off event that
+  already happened ("yesterday I went hiking") the date it happened instead of a validity period, and every renderer
+  reads it "(on 2026-09-26)". Before, the model wrote the day as `valid_from` alone, which read "since", or as
+  `valid_from` = `valid_until`, which dropped the event from the profile block the day after. An event keeps no
+  validity of its own; told again without a date it keeps its day. "Moved to" a place entails living there since the
+  move's day. As-of recall, derivation (ordering, durations), the conflict block, the MCP projection and
+  `MemoryHistory.OccurredOnUtc` read it; two events on different days are never merged as one statement.
+
+- **Dates reach the prompt, at the precision they were stated.** A fact's validity dates now keep how precisely
+  they were written (`Fact.ValidFromPrecision` / `ValidUntilPrecision`, the new `DatePrecision` enum, stored as
+  `valid_from_precision` / `valid_until_precision` on every fact write path); the extractor records it, because only
+  the parser can tell "2024-03" from "2024-03-01". With the new `IncludeDates` switch
+  (`ContextFormatOptions` / `AgentFrameworkOptions.ContextFormat`, and `WorkingMemoryOptions` for the profile block)
+  relevant facts render their dates by one rule (the conflict and supersession blocks too; Semantic Kernel through
+  `MemoryRecallSecurityOptions.IncludeDates`) (`Rosa moved to Lyon (since 2024-03)`, `(until 2027-06)`,
+  `(2024 to 2027)`, `(on 2026-09-26)`), and a recalled turn from another session carries the day it was said
+  (`[2026-09-20] I went hiking yesterday.`). Found in simulated conversations: the date of a move was extracted and
+  stored, and the agent answered "I don't have the date", because relevant facts rendered as `subject predicate
+  object` only. Off (the default) the prompt is byte-for-byte what it was. Due and expiring reminders, which always
+  printed a date, now print it at its precision too (unchanged for dates stored before precision was).
+
+- **`MemoryOptions.SharedRecallBudget`: shared knowledge gets its own recall budget and its own label.** With one
+  budget, a large shared corpus (a book, a catalogue, a manual) competes with a person's own memories for the same
+  top k and wins by numbers: measured on four embedding models, shared items took 7 to 8 of 10 fact slots on
+  questions about the person and pushed out answers the person had given. A similarity floor cannot fix that (the
+  shared items are relevant by score, just not about the person); separate budgets do: own top k plus shared top n
+  cut shared items per question from 7.6 to 3.0 with every answer kept or better, on every model tested. When set,
+  an owner's recall that includes shared memory searches its own rows and the shared rows separately (live,
+  point-in-time and fan-out legs alike; predicate expansion and derived facts read the owner's own rows), and
+  `MemoryContext.SeparatesSharedKnowledge` tells the renderers, which then show owner-less entities, facts and
+  preferences under a "shared knowledge, not about the user" label instead of "Known facts" / "User preferences".
+  A long-term search called directly then returns up to its limit of own rows plus up to the budget of shared ones.
+  Null (the default) keeps one budget and renders as before.
+- **`LlmExtractionOptions.OwnPreferencesOnly`: a preference is the user's own stated taste.** Every extractor is
+  told that someone else's taste ("my brother hates cilantro", a character who "does not like raw eggs") is a fact
+  about that person and that a request ("recommend some music") is not a preference. Found live: a taught book's
+  characters' tastes, and a request, were stored as the user's preferences, and a preference always renders as the
+  user's. Off (the default) every prompt is byte-for-byte what it was.
+
 - **Forget a message without deleting it: `IShortTermMemoryService.InvalidateMessageAsync`.** The message
   stops being recalled or read back (recent messages, message search, whole-session and conversation reads, source
   quotes, session previews) but is kept, with its provenance, for history: as-of reads of times before it was
@@ -182,6 +245,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Entity resolution reads shared candidates by an index seek.** Entities carry `owner_key` (`"*"` when shared) on
+  every write path, with an index and a backfill at bootstrap for existing stores, and the "own or shared" candidate
+  read seeks the shared half by `owner_key = '*'`. It read every entity of the type across all owners to find the
+  shared ones (`owner_id IS NULL` cannot be sought): 1,122 database hits on a store of 868 entities, growing with the
+  whole store.
+- **A preference stating a single-valued relation replaces its previous value**, marked as a correction or not:
+  "Favourite band is Arcade Fire" closes "Favourite band is Radiohead" in the same category (with
+  `SupersedeReplacedFacts`). Found in simulated conversations: the model did not always mark "not Radiohead".
+
+- **A relationship said again is the edge already stored, and a single-valued relation ends its previous edge.**
+  Extraction reuses the live edge with the same source, relation and target, so "lives in Lyon" stated twice is one
+  edge (it was two: the store merges on id and every extracted relationship had a fresh one); the restatement keeps
+  the stored edge's sources (adding its own), validity, description and attributes. With
+  `SupersedeReplacedFacts`, a new edge of a single-valued relation ends the previous one from the same source,
+  in any of its present-state forms ("lives_in Copenhagen" ends "lives_in Hamburg"; "employed_by" a new firm ends
+  "works_at" the old one), and only once the new edge is stored. Found in simulated conversations: the facts were
+  replaced and both residence edges stayed.
+- **`favourite <thing>` is one relation however it is written**: "has favourite band", "favourite band is" and
+  "favorite band" are replaced by a new favourite band.
+- **A marked correction closes the fact it names, conservatively, before supersession runs**: among the live facts of
+  the subject that mention the replaced value (either containing the other, as whole words), those stating the new
+  fact's relation; failing that, the one fact that mentions it, only if it is the only one and the mention is more
+  than one coincidental word. So "works for a wind energy firm, replaces the shipping company" closes "works at a
+  shipping company" and leaves "left the shipping company" (a true event), and "age 7, replaces 6" never closes
+  "weighs 6 kg". A correction on a shared write closes shared facts (it closed nothing before).
+
+- **The speaker is the named person, not an entity called "user".** With `ResolveUserToName` (on by default), once
+  the user's name is known an extracted "user" (or "the user", "I", "me", "myself") entity is written under that name,
+  or not at all when the person is already an entity, and a relationship from a self word lands on the person: the
+  prompt calls the speaker "the user", and the model listed "user" among the people, so a "user" node stood beside
+  the person's own. Until the name is known it is stored as before, so no relationship hanging from it is lost.
+- **A question's presupposition is not a statement** (`IgnoreQuestions`, on by default): the instruction now says
+  that what a question takes for granted is not stated either ("When did I move to Lyon?" was stored as a move).
+
+- **Write-time supersession recognises a change of mind stated in other words** (with `SupersedeReplacedFacts`):
+  - a new value replaces **every present-state form** of its relation, not only its own predicate: "works for"
+    replaces "works at", "employed by" replaces "works for". The forms are declared in the vocabulary
+    (`presentForms`); history forms ("worked at", "used to work in", "lived in") neither replace the current value
+    nor are replaced by it;
+  - a stated **age** is written as the single-valued `age` relation ("Bruno is 7 years old" replaces "6 years
+    old"; a bare number after "is" is left alone);
+  - **`favourite <thing>`** is single-valued per thing (a plural, "favourite bands are", is not);
+  - an **event states the state it entails** when the vocabulary declares it: "moved to Copenhagen" also writes "lives
+    in Copenhagen", which replaces the previous residence; only from a completed form ("moved to", not "moving to"),
+    for an event that has happened, when the object is a place ("moved to the analytics team" states no home), and
+    never over a current state the same turn states ("I moved to London in 2010; now I live in Paris"; "I lived in
+    Paris" is history and does not count); two moves in one turn each state their home, the later replacing the
+    earlier;
+  - a value whose validity has **already ended** ("worked at Google until 2019") no longer replaces the current one.
+
+- **A shared write (`ExtractionRequest.ShareWithEveryone`) stores no preferences** (single and batch extraction). Shared knowledge has no user,
+  so nothing it states is the user's taste; its facts are kept. The dropped count is tagged on the extraction
+  span (`memory.extract.shared_preferences_dropped`).
+- **An owner's mention joins a shared entity by exact name or alias only.** Fuzzy, partial-name and semantic
+  matching see the owner's own entities; the exact matcher sees shared ones too. Found live: a person's "Bill
+  Evans" (the pianist) was merged by the partial-name matcher into a taught book's "Bill" (the lizard), and his
+  relationship pointed at the lizard. A shared write, or a resolution without an owner, is unchanged.
+- **Similarity thresholds say which scale they are on.** Neo4j's vector search scores `(1 + cosine) / 2`, so
+  `RecallOptions.MinSimilarityScore = 0.7` is a cosine of 0.40 (and 0.55 a cosine of 0.10, which admits almost
+  everything); the in-process matchers (`SemanticMatchThreshold`, `WithinExtractionDuplicateThreshold`) compare raw
+  cosines. Documented on each option.
+
 - **Owner-first vector recall (`MemoryOptions.OwnerFirstVectorThreshold`, default 500).** The vector index is
   shared by every owner and filtered afterwards, so other owners' near-identical facts could crowd a small owner
   out: measured, a 24-fact owner got 2 of its facts in the global top 60, and a stored answer (“Dana works at
@@ -265,6 +390,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all prerelease, and a shipped package may not depend on one.
 
 ### Fixed
+
+- **"What do I have coming up in October?", asked in September, recalled last October** (`ResolveTemporalQueries`).
+  A month still ahead this year, named without a year, now resolves to last year only in a past-tense question
+  ("what did I do in October?") that points nowhere ahead ("where did I say I'd be", "what was planned" stay at now);
+  otherwise the recall stays at now. Found once extraction dated future facts: the
+  point-in-time recall of last October hid an appointment dated this October, and the agent answered "nothing".
+
+- **Supersession replaces only a value that holds now**: one that has ended is history (closing it hid it from as-of
+  recall) and one that has not begun is a plan. The same rule for winners and for the losers the query finds.
+
+- **Which value one extraction leaves current is decided once, the same on both write paths** (with
+  `SupersedeReplacedFacts`). Two values of one single-valued relation in one turn ("I moved to Copenhagen, then to
+  Oslo", two favourite bands) closed each other on the batch path, which writes both before supersession runs. Now a
+  value a correction of the same extraction names is old; of one relation's values the last said that is not old is
+  current; every other one supersedes nothing and is closed by the current one once everything is written. So a
+  correction wins over its old value restated after it, chained corrections ("Oslo now, not Copenhagen, where I'd
+  moved from Berlin") leave the newest, and favourites follow the same rule. A correction naming its own value marks
+  nothing, and a correction's other-relation fallback leaves alone what this extraction created or said after it.
+  A value that has ended is never current; of two dated values the later-dated one is, whatever order they were
+  said in; no correction of the extraction closes its current value ("Copenhagen, not Oslo ... no, Oslo"); a
+  current value that fails to write is stood in for by the latest value not corrected away; nothing is closed until
+  every fact of the extraction is written, on either path; and the current value supersedes what a replaced one would
+  have (under another self word, say).
+
+- **A month was stored as a day.** The temporal instruction now asks the model to write a date only as precisely as
+  it was stated ("2024-03" for "in March 2024"): it wrote "2024-03-01", the stored precision was a day, and the agent
+  answered "on March 1st". The parser already kept the reduced forms.
+- **Extracted dates were resolved against a guessed year.** The temporal instruction tells the model each turn
+  carries its time, but only the multi-session extractor sent it; the single-session extractors (every agent turn)
+  sent none, so "a half marathon in April", said in September 2026, was stored as April 2025. With
+  `TemporalValidity = Extract` every extractor now prefixes each turn with its time, by one rendering.
+
+- **"works for" never superseded "works at".** Cardinality resolved stored predicates with the question-side
+  resolver, which refuses stored-only forms, so a predicate stored under a single-valued relation counted as an
+  unknown, multi-valued one. Stored predicates now resolve through the stored forms.
+
+- **Entity resolution's vector-index prefilter read `SemanticMatchThreshold` on the wrong scale.** The threshold is
+  a cosine (the semantic matcher computes one); the index scores `(1 + cosine) / 2`, so the default 0.8 asked the
+  index for anything above a cosine of 0.6. It is converted now. The matcher already rejected the extras, so which
+  entity resolves does not change; the candidate list is the one the setting describes.
 
 - **The fact that names the user keeps the subject `user`.** With canonical subjects on, an extraction in which
   "user" resolved to the person the user named ("Hi! I'm Dana") stored the naming fact as `Dana | is named | Dana`,

@@ -212,7 +212,26 @@ internal static class ExtractionPromptSemantics
     internal static string QuestionsInstruction(bool ignore) => ignore
         ? "\nA question asks; it does not state. Do not create entities, facts or relationships from what "
           + "a turn asks about (\"What do you remember about my brother?\" states nothing), only from what "
-          + "it states outright (\"Can you help with my trip to Seville next week?\" states a trip)."
+          + "it states outright (\"Can you help with my trip to Seville next week?\" states a trip). What a question "
+          + "takes for granted is not stated either: \"When did I move to Lyon?\" states no move."
+        : string.Empty;
+
+    /// <summary>
+    /// 36.3. A preference belongs to the user who states it. Empty when off. Worded for every extractor:
+    /// the unified ones move another person's taste into a fact, the preference-only one leaves it out.
+    /// </summary>
+    internal static string OwnPreferencesInstruction(bool ownOnly) => ownOnly
+        ? "\nA preference is the user's own taste, stated by the user. Someone else's taste is not a "
+          + "preference (\"my brother hates cilantro\", a character who \"does not like raw eggs\"): it is a "
+          + "fact about that person, with that person as the subject. A request is not a preference either "
+          + "(\"recommend some music\" asks for something; it states no taste)."
+        : string.Empty;
+
+    /// <summary>36.4. Mark what a correction replaces. Empty when off.</summary>
+    internal static string CorrectionsInstruction(bool mark) => mark
+        ? "\nWhen a turn corrects or replaces something said before (\"actually it's X, not Y\", \"X instead of Y\", "
+          + "\"not Y anymore\", \"I left Y\"), add \"replaces\": \"Y\" to the new fact or preference, with Y the old "
+          + "value exactly as it was said. Omit \"replaces\" everywhere else."
         : string.Empty;
 
     internal static string UserNameInstruction(bool capture) => capture
@@ -232,7 +251,11 @@ internal static class ExtractionPromptSemantics
             "after THAT instant, never the Monday after today. A conversation from last " +
             "spring records last spring's dates. Omit both when the fact has no stated " +
             "time bound - never guess an expiry, because an unbounded fact recorded as expiring is " +
-            "worse than one recorded as permanent.",
+            "worse than one recorded as permanent. Write a date only as precisely as it was stated: " +
+            "\"2024-03\" for \"in March 2024\", \"2024\" for \"in 2024\", a full date only when the day was said. " +
+            "A one-off event that already happened (\"yesterday I went hiking\", \"last Friday I cooked paella\") " +
+            "is not a period: give it \"occurred_on\", the date it happened, just as precisely, and no valid_from " +
+            "or valid_until.",
         _ => string.Empty,
     };
 
