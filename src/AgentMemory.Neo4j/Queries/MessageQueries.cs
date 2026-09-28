@@ -208,6 +208,22 @@ internal static class MessageQueries
             ORDER BY m.timestamp DESC
             LIMIT $limit";
 
+    // ── 37.4: deferred extraction ──────────────────────────────────────
+
+    /// <summary>Marks messages as waiting for extraction, held for an owner (or a session); null removes the mark.</summary>
+    public const string SetExtractionDeferred = @"
+            UNWIND $messageIds AS messageId
+            MATCH (m:Message {id: messageId})
+            SET m.extraction_deferred = $heldFor";
+
+    /// <summary>The live messages held for an owner (or a session), oldest first; a seek on the deferral index.</summary>
+    public const string GetExtractionDeferred = @"
+            MATCH (m:Message {extraction_deferred: $heldFor})
+            WHERE m.invalidated_at IS NULL
+            RETURN m
+            ORDER BY m.timestamp ASC, m.id ASC
+            LIMIT $limit";
+
     // ── GetAllBySessionAsync ───────────────────────────────────────────
 
     /// <summary>Get ALL messages for a session in chronological (oldest-first) order, with no cap.

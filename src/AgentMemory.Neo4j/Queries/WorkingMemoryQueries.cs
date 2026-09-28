@@ -56,6 +56,31 @@ internal static class WorkingMemoryQueries
                    f.occurred_on AS occurredOn, f.occurred_on_precision AS occurredOnPrecision
             ORDER BY f.created_at ASC, f.id ASC";
 
+    /// <summary>
+    /// 37.5. What the person talked about most since <c>$since</c>: entities of the owner named by live facts, counted
+    /// by the distinct facts extracted in the window from live user messages (a batch linking one fact to several
+    /// messages counts it once; what the agent said never counts), never the person (a self word, or their stated
+    /// name, found by the same keys the name lookup uses). Ordered by mentions, then name, so the line is byte-stable.
+    /// </summary>
+    public const string SelectRecentTopics = @"
+            MATCH (f:Fact {owner_id: $ownerId})-[:EXTRACTED_FROM]->(m:Message)
+            WHERE f.invalidated_at IS NULL AND m.role = 'user' AND m.invalidated_at IS NULL
+              AND m.timestamp >= datetime($since)
+            WITH DISTINCT f
+            UNWIND [f.subject, f.object] AS topic
+            WITH topic, count(DISTINCT f) AS mentions
+            WHERE mentions >= $minMentions
+              AND NOT toLower(topic) IN $selfWords
+              AND EXISTS { MATCH (e:Entity {owner_id: $ownerId}) WHERE toLower(e.name) = toLower(topic) AND e.invalidated_at IS NULL }
+              AND NOT EXISTS {
+                  MATCH (n:Fact {owner_id: $ownerId})
+                  WHERE n.subject_key IN $selfKeys AND n.predicate_key IN $namingKeys
+                    AND n.invalidated_at IS NULL AND (n.valid_until IS NULL OR n.valid_until > datetime($now))
+                    AND toLower(n.object) = toLower(topic) }
+            RETURN topic, mentions
+            ORDER BY mentions DESC, topic ASC
+            LIMIT $limit";
+
     /// <summary>Active preferences: live and above the confidence floor.</summary>
     public const string SelectActivePreferences = @"
             MATCH (p:Preference {owner_id: $ownerId})

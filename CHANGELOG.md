@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A turn in which the user only asks waits for the next turn that tells something**
+  (`AgentFrameworkOptions.DeferQuestionTurns`, off by default; `ExtractionRequest.DeferIfOnlyAsking` for other hosts;
+  `ExtractionOptions.MaxDeferredTurns` 3). In simulated conversations 43 % of extraction calls returned nothing, almost
+  all on question turns. The waiting turn is marked on its stored message (`IMessageRepository.SetExtractionDeferredAsync`
+  / `GetExtractionDeferredAsync`, default members: a store without them extracts every turn at once), held for its
+  owner (the session when there is none), so it survives a restart, stays in its store, is never released into
+  another owner's extraction, is gone when forgotten, and is extracted with the owner's next telling turn in any
+  session (or once the maximum waits); the marks clear only when that extraction succeeds, and a store that fails
+  while deferring extracts the turn at once. Asking to be
+  reminded or to have something remembered is never held. The extraction context window now reaches up to the last
+  target, so what the agent said between a waiting question and the turn that released it resolves references.
+
+- **"Lately": what the person has talked about most recently** (`WorkingMemoryOptions.RecentTopicsDays`, off by default;
+  `MaxRecentTopics` 3, `MinRecentTopicMentions` 2). The profile block ends with one line, `Lately (7 days): marathon
+  (5 mentions), Ana (2 mentions)`: entities of the owner named by live facts, counted by the distinct facts extracted
+  in the window from what the person said (live user messages), never the person themselves. What the agent said or
+  recalled does not count; ties break by name so the block stays byte-stable, and it is rebuilt at least daily so the
+  window slides. One read per rebuild, only when enabled.
+
 - **`SupersededFact.ValidUntilPrecision`** (and `EffectiveDatePrecision`), so a predecessor's end prints at the
   precision it was stated.
 
@@ -245,6 +264,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dates and the shared-knowledge budget are on by default.** `IncludeDates` is now true on every renderer (Agent
+  Framework `ContextFormatOptions`, Core `MemoryContextFormatterOptions`, Semantic Kernel `MemoryRecallSecurityOptions`,
+  `WorkingMemoryOptions`) and `MemoryOptions.SharedRecallBudget` is 3: in simulated conversations both kept every answer
+  and improved the dated ones. A store without shared memory of a kind is no longer searched for it (the split had
+  searched twice per memory type everywhere; now one cached existence check per store and kind). Shared knowledge
+  written in the same process is recalled at once; one written by another process, within 30 seconds. Set
+  `IncludeDates = false` or `SharedRecallBudget = null` for the earlier prompt. The model-dependent extraction switches
+  (`TemporalValidityMode.Extract`, `MarkCorrections`, `OwnPreferencesOnly`) and `SupersedeReplacedFacts` stay opt-in.
+
 - **Entity resolution reads shared candidates by an index seek.** Entities carry `owner_key` (`"*"` when shared) on
   every write path, with an index and a backfill at bootstrap for existing stores, and the "own or shared" candidate
   read seeks the shared half by `owner_key = '*'`. It read every entity of the type across all owners to find the
@@ -390,6 +418,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all prerelease, and a shipped package may not depend on one.
 
 ### Fixed
+
+- **An object the model wrote twice is stored once.** "Daniel | is a chef | chef" rendered "Daniel is a chef chef":
+  a predicate that ends with its own object's words (with or without a leading article) is trimmed at write, on every
+  fact, and an article left dangling moves to the object ("Daniel | is | a chef", "lives in | the Netherlands");
+  "works at | Acme" and a predicate that would be left empty are unchanged.
 
 - **"What do I have coming up in October?", asked in September, recalled last October** (`ResolveTemporalQueries`).
   A month still ahead this year, named without a year, now resolves to last year only in a past-tense question

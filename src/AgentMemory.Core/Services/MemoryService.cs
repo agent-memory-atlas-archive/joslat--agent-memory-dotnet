@@ -32,6 +32,7 @@ internal sealed class MemoryService : IMemoryService
     // deferred path, which is what every host had before.
     private readonly IMemoryAccessTracker? _accessTracker;
     private readonly MemoryOptions _options;
+    private readonly IMessageRepository? _messageRepository;
     private readonly IClock _clock;
     private readonly IIdGenerator _idGenerator;
     private readonly ILogger<MemoryService> _logger;
@@ -54,8 +55,10 @@ internal sealed class MemoryService : IMemoryService
         IMemoryDecayService? decayService = null,
         IConversationRepository? conversationRepository = null,
         IMemoryIsolationPolicy? isolationPolicy = null,
-        IMemoryAccessTracker? accessTracker = null)
+        IMemoryAccessTracker? accessTracker = null,
+        IMessageRepository? messageRepository = null)
     {
+        _messageRepository = messageRepository;
         ArgumentNullException.ThrowIfNull(shortTerm);
         ArgumentNullException.ThrowIfNull(assembler);
         ArgumentNullException.ThrowIfNull(extraction);
@@ -353,9 +356,71 @@ internal sealed class MemoryService : IMemoryService
     {
         ArgumentNullException.ThrowIfNull(request);
         _logger.LogDebug("Extracting and persisting memory for session {SessionId}", request.SessionId);
+
+        // 37.4. A turn that only asks waits, stored, for the owner's next turn that tells something (in any session: a
+        // session that ends on a question is taken along by the next one). Held for the owner, never another's.
+        IReadOnlyList<string> released = [];
+        if (request.DeferIfOnlyAsking && _messageRepository is not null && request.Messages.Count > 0)
+        {
+            var heldFor = !string.IsNullOrWhiteSpace(request.UserId) ? "owner:" + request.UserId : "session:" + request.SessionId;
+            try
+            {
+                var max = Math.Max(1, _options.Extraction.MaxDeferredTurns);
+                // Turns are counted as the user's messages; read generously so no waiting message is left unread.
+                var waiting = await _messageRepository.GetExtractionDeferredAsync(heldFor, max * 8, cancellationToken)
+                    .ConfigureAwait(false);
+                var ids = request.Messages.Select(message => message.MessageId).ToHashSet(StringComparer.Ordinal);
+                var held = waiting.Where(message => !ids.Contains(message.MessageId)).ToList();
+                var heldTurns = held.Count(message => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase));
+                if (Extraction.ExtractionNoveltyGate.OnlyAsks(request.Messages) && heldTurns + 1 < max)
+                {
+                    await _messageRepository.SetExtractionDeferredAsync(ids, heldFor, cancellationToken).ConfigureAwait(false);
+                    _logger.LogDebug("Extraction deferred: the turn only asks ({Waiting} turn(s) now waiting in session {SessionId}).",
+                        held.Count + 1, request.SessionId);
+                    return new ExtractionResult
+                    {
+                        Metadata = new Dictionary<string, object> { [DeferredMetadataKey] = true },
+                    };
+                }
+                if (held.Count > 0)
+                {
+                    // What waited was said first: it comes first, as targets, never as context.
+                    released = [.. held.Select(message => message.MessageId)];
+                    request = request with { Messages = [.. held, .. request.Messages] };
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                // The store cannot hold a turn (not supported, or failing now): extract it now, as before. Never lost.
+                if (ex is not NotSupportedException)
+                    _logger.LogWarning(ex, "Deferring or releasing turns failed for {HeldFor}; the turn is extracted now.", heldFor);
+                released = [];
+            }
+        }
+
         request = await WithExtractionContextAsync(request, cancellationToken).ConfigureAwait(false);
-        return await _extraction.ExtractAsync(request, cancellationToken).ConfigureAwait(false);
+        var result = await _extraction.ExtractAsync(request, cancellationToken).ConfigureAwait(false);
+
+        // Unmarked only once extracted: a failed extraction leaves them waiting for the next telling turn.
+        if (released.Count > 0 && result.Status != IngestionStatus.Failed)
+        {
+            try
+            {
+                await _messageRepository!.SetExtractionDeferredAsync(released, heldFor: null, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not unmark {Count} extracted turn(s) in session {SessionId}; they may be extracted again.",
+                    released.Count, request.SessionId);
+            }
+        }
+        return result;
     }
+
+    /// <summary>37.4. Result metadata key set (true) when a turn was held for later extraction.</summary>
+    internal const string DeferredMetadataKey = "agentMemory.extraction.deferred";
 
     /// <summary>
     /// Attaches the preceding turns an extractor may read to resolve references (E2).
@@ -397,9 +462,11 @@ internal sealed class MemoryService : IMemoryService
         // both would be handed to the model twice -- once as "do not extract from this".
         // And only what came BEFORE them: extracted after the turn (ExtractInBackground), the newest
         // stored messages can be LATER turns, and references would resolve against the future.
-        var earliestTarget = request.Messages.Min(m => m.TimestampUtc);
+        // Up to the LAST target: turns that waited (37.4) come first among the targets, and what was said between them
+        // and the turn that released them (the agent's replies) is exactly the context that resolves them.
+        var latestTarget = request.Messages.Max(m => m.TimestampUtc);
         var context = recent
-            .Where(m => !targetIds.Contains(m.MessageId) && m.TimestampUtc <= earliestTarget)
+            .Where(m => !targetIds.Contains(m.MessageId) && m.TimestampUtc <= latestTarget)
             .TakeLast(wanted)
             .ToList();
 

@@ -68,10 +68,30 @@ public sealed class WorkingMemoryOptions
 
     /// <summary>
     /// 36.1. The block's facts carry their validity dates, at the precision they were stated
-    /// (<c>Rosa works at the hospital (since 2021)</c>), by the same rule the recall renderers use. Default false:
-    /// the block is byte-for-byte what it was.
+    /// (<c>Rosa works at the hospital (since 2021)</c>), by the same rule the recall renderers use. Default true (37.1),
+    /// as for the recall renderers; false builds the block as before, without dates.
     /// </summary>
-    public bool IncludeDates { get; set; }
+    public bool IncludeDates { get; set; } = true;
+
+    /// <summary>
+    /// 37.5. "What's been on the person's mind lately": the block ends with one line naming the topics the person
+    /// talked about most in the last this-many days (<c>Lately (7 days): marathon (5 mentions), Ana (2 mentions)</c>).
+    /// 0, the default, leaves the block as it was.
+    /// </summary>
+    /// <remarks>
+    /// A topic is an entity of the owner that a live fact names as its subject or object, never the person
+    /// themselves; it is counted by the distinct facts naming it that were extracted, in the window, from what the
+    /// person said (the facts' <c>EXTRACTED_FROM</c> provenance to live user messages with their time). What the agent
+    /// said or recalled does not count. No decay inside the window; ties break by name, so the line is stable between
+    /// rebuilds with the same inputs; the block is rebuilt at least daily while it carries the line, so it slides.
+    /// </remarks>
+    public int RecentTopicsDays { get; set; }
+
+    /// <summary>37.5. Most topics on the "Lately" line (default 3).</summary>
+    public int MaxRecentTopics { get; set; } = 3;
+
+    /// <summary>37.5. How many mentions in the window make a topic "top of mind" (default 2: said once is not lately).</summary>
+    public int MinRecentTopicMentions { get; set; } = 2;
 
     /// <summary>On a rebuild failure, clear the stored block rather than leaving it stale.</summary>
     /// <remarks>

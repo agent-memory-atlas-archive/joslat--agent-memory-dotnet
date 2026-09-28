@@ -62,6 +62,9 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
         var now = _clock.UtcNow;
         var text = await ComposeAsync(ownerId, now, cancellationToken).ConfigureAwait(false);
         var validUntil = await NextValidityBoundaryAsync(ownerId, now, cancellationToken).ConfigureAwait(false);
+        // 37.5. A block with a "Lately" line is a view of a sliding window: it is rebuilt at least daily, writes or not.
+        if (text.Contains("Lately (", StringComparison.Ordinal))
+            validUntil = EarlierOf(validUntil, now.AddDays(1));
         // The boundary is part of what is stored, so it is part of the hash: a rebuild whose text is
         // unchanged but whose next boundary moved still writes.
         var hash = Hash(validUntil is null ? text : $"{text}\n@{validUntil}");
@@ -283,7 +286,29 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
                 .ToList();
         }, cancellationToken).ConfigureAwait(false) ?? [];
 
-        return Compose(facts, preferences, entities, _options.MaxTokens);
+        // 37.5. Only when asked: no query, and the block as it was, otherwise.
+        var lately = _options.RecentTopicsDays <= 0 ? [] : await _tx.ReadAsync(async runner =>
+        {
+            var cursor = await runner.RunAsync(WorkingMemoryQueries.SelectRecentTopics, new
+            {
+                ownerId,
+                since = now.AddDays(-_options.RecentTopicsDays).ToString("O"),
+                now = now.ToString("O"),
+                minMentions = Math.Max(1, _options.MinRecentTopicMentions),
+                limit = Math.Max(1, _options.MaxRecentTopics),
+                selfWords = AgentMemory.Core.Extraction.PersistenceStage.UserNames.SelfWords,
+                selfKeys = AgentMemory.Core.Extraction.PersistenceStage.UserNames.SelfWords
+                    .Select(AgentMemory.Core.Memory.MemoryTripleCanonicalizer.CanonicalValue).Distinct().ToList(),
+                namingKeys = AgentMemory.Core.Extraction.PersistenceStage.UserNames.NamingPredicates
+                    .Select(AgentMemory.Core.Memory.MemoryTripleCanonicalizer.Canonical).Distinct().ToList(),
+            }).ConfigureAwait(false);
+            var records = await cursor.ToListAsync().ConfigureAwait(false);
+            return records
+                .Select(r => $"{r["topic"].As<string>()} ({r["mentions"].As<long>().ToString(System.Globalization.CultureInfo.InvariantCulture)} mentions)")
+                .ToList();
+        }, cancellationToken).ConfigureAwait(false) ?? [];
+
+        return Compose(facts, preferences, entities, _options.MaxTokens, lately, _options.RecentTopicsDays);
     }
 
     /// <summary>
@@ -299,18 +324,23 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
         IReadOnlyList<string> facts,
         IReadOnlyList<string> preferences,
         IReadOnlyList<string> entities,
-        int maxTokens)
+        int maxTokens,
+        IReadOnlyList<string>? lately = null,
+        int latelyDays = 0)
     {
         var factLines = facts.ToList();
         var preferenceLines = preferences.ToList();
         var entityLines = entities.ToList();
+        var latelyTopics = (lately ?? []).ToList();
 
         while (true)
         {
-            var rendered = Render(factLines, preferenceLines, entityLines);
+            var rendered = Render(factLines, preferenceLines, entityLines, latelyTopics, latelyDays);
             if (EstimateTokens(rendered) <= maxTokens || rendered.Length == 0) return rendered;
 
-            if (entityLines.Count > 0) entityLines.RemoveAt(entityLines.Count - 1);
+            // "Lately" first: it is the newest and least essential line, and a partial list still reads right.
+            if (latelyTopics.Count > 0) latelyTopics.RemoveAt(latelyTopics.Count - 1);
+            else if (entityLines.Count > 0) entityLines.RemoveAt(entityLines.Count - 1);
             else if (preferenceLines.Count > 0) preferenceLines.RemoveAt(preferenceLines.Count - 1);
             else if (factLines.Count > 0) factLines.RemoveAt(factLines.Count - 1);
             else return string.Empty;
@@ -318,7 +348,8 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
     }
 
     private static string Render(
-        IReadOnlyList<string> facts, IReadOnlyList<string> preferences, IReadOnlyList<string> entities)
+        IReadOnlyList<string> facts, IReadOnlyList<string> preferences, IReadOnlyList<string> entities,
+        IReadOnlyList<string> lately, int latelyDays)
     {
         var builder = new StringBuilder();
 
@@ -333,9 +364,22 @@ internal sealed class Neo4jWorkingMemoryService : IWorkingMemoryService
         Section("Stable facts:", facts);
         Section("Active preferences:", preferences);
         Section("Key entities:", entities);
+        if (lately.Count > 0)
+        {
+            if (builder.Length > 0) builder.Append('\n');
+            builder.Append("Lately (").Append(latelyDays.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Append(" days): ").Append(string.Join(", ", lately));
+        }
 
         return builder.ToString();
     }
+
+    /// <summary>The earlier of a stored boundary (ISO-8601, or null) and <paramref name="instant"/>, as ISO-8601.</summary>
+    internal static string EarlierOf(string? boundary, DateTimeOffset instant) =>
+        boundary is not null &&
+        DateTimeOffset.TryParse(boundary, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at) && at <= instant
+            ? boundary
+            : instant.ToString("O", CultureInfo.InvariantCulture);
 
     /// <summary>The estimator the budget is expressed in: ceil(chars / 4).</summary>
     internal static int EstimateTokens(string text) => (text.Length + 3) / 4;

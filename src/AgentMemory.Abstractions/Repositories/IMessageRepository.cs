@@ -102,6 +102,25 @@ public interface IMessageRepository
             "This IMessageRepository implementation cannot forget a message; recall would keep returning it.");
 
     /// <summary>
+    /// 37.4. Marks messages whose extraction waits for the next turn that tells something (a turn in which the user
+    /// only asked), held for <paramref name="heldFor"/> (the owner, or the session when there is none); null unmarks.
+    /// The mark is stored on the message, so what waits survives a restart, stays in its store, is never released into
+    /// another owner's extraction, and disappears when the message is forgotten or its session cleared.
+    /// </summary>
+    /// <remarks>Default: not supported. A store without it extracts every turn at once, as before.</remarks>
+    Task SetExtractionDeferredAsync(
+        IReadOnlyCollection<string> messageIds, string? heldFor, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("This IMessageRepository implementation cannot hold a turn for later extraction.");
+
+    /// <summary>
+    /// 37.4. The live messages held for <paramref name="heldFor"/> by <see cref="SetExtractionDeferredAsync"/>, in any
+    /// session, oldest first, at most <paramref name="limit"/>.
+    /// </summary>
+    Task<IReadOnlyList<Message>> GetExtractionDeferredAsync(
+        string heldFor, int limit, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("This IMessageRepository implementation cannot hold a turn for later extraction.");
+
+    /// <summary>
     /// Gets several messages by id in one call. Ids that do not exist are simply absent.
     /// </summary>
     /// <remarks>
