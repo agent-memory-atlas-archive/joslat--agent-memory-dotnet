@@ -15,6 +15,7 @@ because their effect depends on the model.
 - `ContextFormatOptions`: `AgentFrameworkOptions.ContextFormat` in `AddAgentMemoryFramework`.
 - `MemoryContextFormatterOptions` (Core) and `MemoryRecallSecurityOptions` (Semantic Kernel): the
   renderer of each surface.
+- `Neo4jOptions`: the `configureNeo4j` lambda of `AddNeo4jAgentMemory`.
 
 ## The switches
 
@@ -28,6 +29,7 @@ because their effect depends on the model.
 | `RecallOptions.MaxRelationships` | `0` | How many live relationships touching the recalled entities to include, rendered `Rosa — best friend → Carmen`. `0` reads none. Live recall only. |
 | `LlmExtractionOptions.TemporalValidity` | `TemporalValidityMode.Ignore` | `Extract` asks the model for validity dates where the conversation states them, at the precision stated, and for the day a one-off event happened (`Fact.OccurredOn`); each turn reaches the extractor with its timestamp. |
 | `ExtractionOptions.SupersedeReplacedFacts` | `false` | A new value of a single-valued relation closes the one it replaces: every present-state form ("works for" replaces "works at"), a stated age, `favourite <thing>`, an entailed state ("moved to" a place → "lives in"), relationship edges. Only values that hold now replace or are replaced. |
+| `LlmExtractionOptions.CaptureEventCompanions` | `false` | Who an event was shared with is also written as its own fact ("user \| went hiking with \| Pedro", with the event's day), so "who was with me?" has an answer however the event itself is split. |
 | `LlmExtractionOptions.MarkCorrections` | `false` | The extractor marks what a correction replaces ("actually Arcade Fire, not Radiohead"); with `SupersedeReplacedFacts`, the write closes the fact or preference it names. |
 | `LlmExtractionOptions.OwnPreferencesOnly` | `false` | A preference is only the user's own stated taste; someone else's taste is a fact about them, and a request is not a preference. |
 | `ExtractionOptions.ResolveUserToName` | `true` | Once the user's name is known, what they say about themselves is stored under that name, and no entity called "user" is created beside the person. |
@@ -45,6 +47,15 @@ Behaviour with no switch:
   "is a | chef").
 - Entities carry `owner_key` (`"*"` when shared), so entity resolution seeks shared candidates by
   index; existing stores are backfilled at bootstrap. See [schema.md](../schema.md).
+- A value said again after it was replaced starts a second period (its own fact), so the first period keeps its end
+  and as-of recall of the time between is right; facts carry `period_key`, backfilled at bootstrap.
+- A plan that has begun takes over from the value it was planned to replace in recall, at the recall's instant.
+
+### Newer Neo4j servers
+
+| Option | Default | What it does |
+|---|---|---|
+| `Neo4jOptions.FilteredVectorIndexes` | `false` | Neo4j 2026.x and later: bootstrap creates owner-filtered vector indexes for facts and entities (the embedding, filtered on `owner_key`), and owner-scoped recall searches them, so an owner is never crowded out of a global top-K by other owners' rows. Refused at bootstrap on an older server. |
 
 ## Example
 

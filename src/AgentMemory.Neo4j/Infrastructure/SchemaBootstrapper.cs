@@ -14,6 +14,7 @@ internal sealed class SchemaBootstrapper : ISchemaBootstrapper
     private readonly string[] _vectorIndexes;
     private readonly int _embeddingDimensions;
     private readonly bool _validateVectorIndexDimensions;
+    private readonly bool _filteredVectorIndexes;
 
     /// <summary>Bounded so a large store migrates in pages rather than one transaction.</summary>
     internal const int CanonicalKeyBackfillBatchSize = 500;
@@ -29,6 +30,7 @@ internal sealed class SchemaBootstrapper : ISchemaBootstrapper
         _embeddingDimensions = options.Value.EmbeddingDimensions;
         _validateVectorIndexDimensions = options.Value.ValidateVectorIndexDimensions;
         _vectorIndexes = SchemaQueries.BuildVectorIndexes(_embeddingDimensions);
+        _filteredVectorIndexes = options.Value.FilteredVectorIndexes;
     }
 
     /// <summary>
@@ -177,6 +179,133 @@ internal sealed class SchemaBootstrapper : ISchemaBootstrapper
         return total;
     }
 
+    /// <summary>
+    /// J-6. Gives every fact written before periods existed its <c>period_key</c> (open, or closed when a newer value
+    /// superseded it), in batches, so the fact writes (which MERGE on the open period) find the existing live fact
+    /// instead of writing a second one. Idempotent. Returns how many facts it updated.
+    /// </summary>
+    internal async Task<int> BackfillFactPeriodKeysAsync(int batchSize, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batchSize);
+        var total = 0;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var updated = await _txRunner.WriteAsync(async runner =>
+            {
+                var cursor = await runner.RunAsync(FactQueries.BackfillPeriodKeys, new { limit = batchSize, open = string.Empty }).ConfigureAwait(false);
+                var record = await cursor.SingleAsync().ConfigureAwait(false);
+                return record["updated"].As<long>();
+            }, cancellationToken).ConfigureAwait(false);
+            total += (int)updated;
+            if (updated < batchSize) break;
+        }
+        if (total > 0)
+            _logger.LogInformation("Gave {Count} existing facts their period key.", total);
+        return total;
+    }
+
+    /// <summary>
+    /// G-16. Creates the owner-filtered vector indexes, after checking the server can hold them: a vector index with
+    /// filter properties is a Neo4j 2026.x feature, and a 5.x server would reject the statement with a syntax error
+    /// that says nothing about the option that asked for it.
+    /// </summary>
+    private async Task CreateOwnerFilteredVectorIndexesAsync(CancellationToken cancellationToken)
+    {
+        var version = await _txRunner.ReadAsync(async runner =>
+        {
+            var cursor = await runner.RunAsync(SchemaQueries.ServerVersion, new { kernel = "Neo4j Kernel" }).ConfigureAwait(false);
+            var records = await cursor.ToListAsync().ConfigureAwait(false);
+            return records.Count > 0 ? records[0]["version"].As<string>() : null;
+        }, cancellationToken).ConfigureAwait(false);
+        var major = int.TryParse(version?.Split('.')[0], System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : 0;
+        if (major < 2026)
+            throw new InvalidOperationException(
+                $"Neo4jOptions.FilteredVectorIndexes needs Neo4j 2026.x or later (vector indexes with filter properties); " +
+                $"this server is {version ?? "an unknown version"}. Turn the option off, or upgrade the server.");
+        foreach (var index in SchemaQueries.BuildOwnerFilteredVectorIndexes(_embeddingDimensions))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await RunStatementAsync(index, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<int> RetrimEchoedPredicatesAsync(bool apply, CancellationToken cancellationToken = default)
+    {
+        var parameters = new Dictionary<string, object?>
+        {
+            ["space"] = " ", ["underscore"] = "_", ["articles"] = new[] { "a", "an", "the" }, ["limit"] = CanonicalKeyBackfillBatchSize,
+        };
+        var changed = 0;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var rows = await _txRunner.ReadAsync(async runner =>
+            {
+                var cursor = await runner.RunAsync(FactQueries.SelectEchoedPredicates, parameters).ConfigureAwait(false);
+                return await cursor.ToListAsync().ConfigureAwait(false);
+            }, cancellationToken).ConfigureAwait(false) ?? [];
+
+            var progressed = false;
+            foreach (var row in rows)
+            {
+                var id = row["id"].As<string>();
+                if (!seen.Add(id)) continue;                       // a dry run (or a row the rule leaves alone) comes back
+                var said = new AgentMemory.Abstractions.Domain.ExtractedFact
+                {
+                    Subject = row["subject"].As<string>(), Predicate = row["predicate"].As<string>(),
+                    Object = row["object"].As<string>(), Confidence = 1,
+                };
+                var trimmed = AgentMemory.Core.Extraction.PredicateEcho.Trim(said);
+                if (trimmed.Predicate == said.Predicate && trimmed.Object == said.Object) continue;
+                changed++;
+                progressed = true;
+                if (!apply) continue;
+
+                var keys = new Dictionary<string, object?>
+                {
+                    ["id"] = id,
+                    ["subjectKey"] = row["subjectKey"].As<string?>(),
+                    ["ownerKey"] = row["ownerKey"].As<string?>(),
+                    ["predicate"] = trimmed.Predicate,
+                    ["object"] = trimmed.Object,
+                    ["predicateKey"] = MemoryTripleCanonicalizer.Canonical(trimmed.Predicate),
+                    ["objectKey"] = MemoryTripleCanonicalizer.CanonicalValue(trimmed.Object),
+                    ["now"] = DateTimeOffset.UtcNow.ToString("O"),
+                };
+                await _txRunner.WriteAsync(async runner =>
+                {
+                    var twin = await (await runner.RunAsync(FactQueries.FindTrimmedTwin, keys).ConfigureAwait(false))
+                        .ToListAsync().ConfigureAwait(false);
+                    if (twin.Count > 0)
+                    {
+                        // The trimmed statement is already stored: the echoed copy is superseded by it, as any
+                        // restatement would supersede it (the same statement the repositories use).
+                        await (await runner.RunAsync(FactQueries.Supersede(hasOwnerFilter: false), new Dictionary<string, object?>
+                        {
+                            ["loserId"] = id, ["winnerId"] = twin[0]["id"].As<string>(), ["now"] = keys["now"], ["reinforceAlpha"] = 0.0,
+                        }).ConfigureAwait(false)).ConsumeAsync().ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await (await runner.RunAsync(FactQueries.RewriteTrimmed, keys).ConfigureAwait(false)).ConsumeAsync().ConfigureAwait(false);
+                    }
+                    return true;
+                }, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Applied rows leave the selection; a dry run sees the same page again. Stop when a page adds nothing new.
+            if (!progressed || rows.Count < CanonicalKeyBackfillBatchSize) break;
+        }
+
+        _logger.LogInformation("{Mode}: {Count} fact(s) with a predicate that repeats its object.",
+            apply ? "Re-trimmed" : "Would re-trim", changed);
+        return changed;
+    }
+
     public async Task BootstrapAsync(CancellationToken cancellationToken = default)
     {
         _logger.LogInformation(
@@ -203,6 +332,9 @@ internal sealed class SchemaBootstrapper : ISchemaBootstrapper
             await RunStatementAsync(index, cancellationToken).ConfigureAwait(false);
         }
 
+        if (_filteredVectorIndexes)
+            await CreateOwnerFilteredVectorIndexesAsync(cancellationToken).ConfigureAwait(false);
+
         foreach (var index in SchemaQueries.PropertyIndexes)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -221,6 +353,7 @@ internal sealed class SchemaBootstrapper : ISchemaBootstrapper
         await BackfillCanonicalFactKeysAsync(CanonicalKeyBackfillBatchSize, cancellationToken)
             .ConfigureAwait(false);
         await BackfillEntityOwnerKeysAsync(CanonicalKeyBackfillBatchSize, cancellationToken).ConfigureAwait(false);
+        await BackfillFactPeriodKeysAsync(CanonicalKeyBackfillBatchSize, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Schema bootstrap complete.");
     }

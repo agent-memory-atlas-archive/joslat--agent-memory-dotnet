@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   person, with what was said under that name still attached. Now, when a persist closes a naming fact (`is named`,
   `is called`, any subject: the user, a person, a pet) in favour of a new name, the owner's entity with the old name is
   merged into the one with the new name (created if missing): relationships move, the old name stays as an alias so it
-  is still recognised, and the old entity is closed. The live facts said about the old name are restated under the new
+  is still recognised, and the old entity is closed; when entity resolution already filed the new name under the old entity (as an alias), that entity is renamed in place. The live facts said about the old name are restated under the new
   one, each superseding its original. Facts that mention the old name as their object are not rewritten.
 
 - **The people a recalled fact names bring their relationships** (with `RecallOptions.MaxRelationships` set). Recall
@@ -22,6 +22,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to → Daniel" beside "Daniel works as chef", even when neither person was recalled by itself.
   `ILongTermMemoryService.GetRelationshipsAroundAsync` / `IRelationshipRepository.GetLiveAroundAsync` (defaults fall
   back to the id-only reads).
+
+- **A value said again after it was replaced starts a second period.** "Copenhagen, then Oslo, then back to
+  Copenhagen" used to re-open the first Copenhagen fact: live again, but still ended at the Oslo move, and its first
+  period lost, so "as of the Oslo months" believed both cities. Facts now carry a `period_key`: open ('') while
+  nothing replaced them, the fact's own id once a newer value supersedes it. The fact writes MERGE on the open period,
+  so the triple said again later is a new fact (its own period) and the closed one keeps its end; a restatement of a
+  live fact still lands on it (mention count, confidence), and a fact closed any other way (retracted, decayed,
+  consolidated) re-opens as before. Existing stores get their period keys at bootstrap, before any write.
+  `FindByTripleAsync` prefers the live period. `IFactRepository.FindSupersededCandidatesAsync` gains an overload
+  taking `now`, so write-time supersession judges the candidates at the same instant it judged the new value (it read
+  the store's wall clock before).
+
+- **Owner-filtered vector indexes on Neo4j 2026.x** (`Neo4jOptions.FilteredVectorIndexes`, off by default). A 2026.x
+  vector index can carry filter properties and filter inside the index. With the option on, bootstrap creates
+  `fact_embedding_owner_idx` and `entity_embedding_owner_idx` (the embedding, filtered on `owner_key`; it refuses, by
+  name, to start on an older server), and owner-scoped fact and entity recall searches them with the Cypher 25
+  `SEARCH` clause: the owner's rows, then the shared rows (`owner_key = '*'`; the server takes an exact value, not a
+  list or an OR), merged by score. An owner is then never crowded out of a global top-K, so the widening and rescue
+  scans that work around that on 5.26 are not needed. Off, nothing changes. The integration suite runs against another
+  server with `AGENTMEMORY_TEST_NEO4J_IMAGE` (e.g. `neo4j:2026.02`).
+
+- **Who an event was shared with is kept as its own fact** (`LlmExtractionOptions.CaptureEventCompanions`, off by
+  default). "Yesterday I went hiking in Sintra with my friend Pedro" was kept whole in one extraction and split without
+  Pedro in the next, so "who was with me?" had no answer. With the option on, every extractor (unified, multi-session,
+  per-type facts) also asks for, per companion, "user | went hiking with | Pedro" with the event's day; off, every
+  prompt is byte-for-byte what it was.
+
+- **A plan that has begun takes over from the value it was planned to replace.** "I'm moving to Oslo next month" is
+  stored as a plan and replaces nothing when said; once its start has passed, recall gives Oslo, not Copenhagen as
+  well. Applied where a recall's facts are chosen, at the recall's instant (now, or the as-of time), per owner, subject
+  and single-valued relation; nothing is rewritten, so a plan cancelled later simply stops being live and the old value
+  is current again. Starts are compared at the precision they were said: "in August" is the whole month, so it is not
+  ordered before "on 20 August", and starts that overlap are ordered by when they were said.
+
+- **`agentmemory retrim [--apply]`: repair facts stored before predicate-echo trimming.** Facts written before the
+  write-time trim ("Daniel | is a chef | chef", rendered "is a chef chef") are rewritten as they read once trimmed
+  ("Daniel | is | a chef", identity keys included), or superseded by the trimmed fact when it is already stored. A dry
+  run unless `--apply`; on demand only, never at bootstrap (`ISchemaBootstrapper.RetrimEchoedPredicatesAsync`).
 
 - **A held question turn says so.** `ExtractionResult.Deferred` (and the public `ExtractionResult.DeferredMetadataKey`)
   tell a host that the turn was held for the next one that tells something, rather than extracted with nothing in it;
