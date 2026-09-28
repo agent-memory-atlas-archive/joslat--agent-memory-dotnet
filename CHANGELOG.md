@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-28
+
 ### Changed
 
 - **Microsoft Agent Framework 1.22.0** (from 1.9.0), with Microsoft.Extensions.AI 10.10.1 (from 10.8.3), the
