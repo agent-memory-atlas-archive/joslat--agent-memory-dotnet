@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-28
+
+### Upgrading from 1.5.0
+
+- **Defaults that change what the agent is told or when it learns** (each measured live; each has an off switch,
+  described under Changed): dates in recalled memory (`IncludeDates`), a separate budget for shared knowledge
+  (`SharedRecallBudget` = 3), memorising after the answer (`AgentFrameworkOptions.ExtractInBackground`; turn it off on
+  hosts that freeze the process after replying), learning from what the user said (`ExtractFromUserMessagesOnly`),
+  facts named by the user's name (`ResolveUserToName`, `CaptureUserName`), and questions that state nothing
+  (`IgnoreQuestions`).
+- **One-time writes at the first bootstrap**: `owner_key` on entities and `period_key` on facts, each
+  with its index. Idempotent; nothing is deleted.
+- **Facts stored before the predicate trim** (e.g. `is a chef | chef`) can be re-keyed with `agentmemory retrim`
+  (a dry run by default; `--apply` to write).
+- **New interface members all have default implementations**: custom repositories and services keep compiling.
+- **New package**: `AgentMemory.Inference`. The extensibility SDK (`AgentMemory.Extensibility*`, 0.x, experimental)
+  is not part of this release.
+
 ### Added
 
 - **A corrected name renames what it named** (`ExtractionOptions.RenameOnCorrectedName`, off by default; needs
