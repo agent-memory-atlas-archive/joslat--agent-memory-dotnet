@@ -1,4 +1,4 @@
-using AgentMemory.Abstractions.Options;
+﻿using AgentMemory.Abstractions.Options;
 using AgentMemory.Extraction.Llm;
 using FluentAssertions;
 using Xunit;
@@ -48,6 +48,22 @@ public sealed class TemporalValidityModeTests
         instruction.Should().Contain("valid_from");
         instruction.Should().Contain("valid_until");
         instruction.Should().Contain("Omit");
+    }
+
+    /// <summary>
+    /// PLAN 38.5 (K-14). "Last month I ran my first 10k in 58 minutes" was stored with no date in two
+    /// runs out of two: the instruction resolved "in April" and "yesterday", and the model read a fact whose
+    /// object is a measure as having no event to date. The instruction now names both cases; the live check is
+    /// show 09's "the 10k carries a date".
+    /// </summary>
+    [Fact]
+    public void ExtractDatesRelativePeriodsAndEventsWhoseObjectIsAMeasure()
+    {
+        var instruction = ExtractionPromptSemantics.TemporalValidityInstruction(TemporalValidityMode.Extract);
+
+        instruction.Should().Contain("\"last month\" is the month before the turn's month");
+        instruction.Should().Contain("two weeks ago");
+        instruction.Should().Contain("even when the fact's object is an amount, a time or a distance");
     }
 
     /// <summary>

@@ -1,4 +1,4 @@
-using FluentAssertions;
+﻿using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using AgentMemory.Abstractions.Options;
@@ -194,6 +194,29 @@ public sealed class OptionsValidationTests
         var act = () => _ = provider.GetRequiredService<IOptions<MemoryOptions>>().Value;
 
         act.Should().Throw<OptionsValidationException>();
+    }
+
+    /// <summary>
+    /// PLAN 40.7 (F1), review. Firing without ValidTime = Current never fires on live recall, but 1.6 accepted the
+    /// combination and as-of recall fires without that gate: it stays valid (the assembler warns once instead).
+    /// </summary>
+    [Theory]
+    [InlineData(ValidTimeMode.Ignore)]
+    [InlineData(ValidTimeMode.Current)]
+    public void MemoryOptions_ProspectiveFiringWithAnyValidTime_StaysValid(ValidTimeMode validTime)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddAgentMemoryCore(new MemoryOptions
+        {
+            Recall = RecallOptions.Default with { ProspectiveFiring = true, ValidTime = validTime },
+        });
+
+        using var provider = services.BuildServiceProvider();
+
+        var act = () => _ = provider.GetRequiredService<IOptions<MemoryOptions>>().Value;
+
+        act.Should().NotThrow();
     }
 
     [Fact]
