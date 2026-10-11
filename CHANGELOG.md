@@ -6,6 +6,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dreaming as consolidation operations** (`ConsolidationOptions.CloseGenericEntities`, `CloseUnsaidPreferences`,
+  `OwnerId`, `ApprovedProposals`; `ConsolidationReport.Proposals`; `IPreferenceSourceCheck`; experimental `AMDREAM001`;
+  off by default, and a consolidation run stays a dry run unless asked). The Dreaming jar's round 1-2 winner, as the
+  router arena measured it: generic entities closed when a live fact names them, with their connections, and spared when
+  nothing else holds what was said (P4s); preferences closed when the message they came from never said them, asked of
+  the host's chat model with the measured question, one call per source message (P3q). A dry run lists every proposal
+  with its reason; an apply run with `ApprovedProposals` closes exactly the approved ones, without asking the model
+  again. Closings are soft (`invalidated_at`, `invalidated_reason = 'consolidation'`), never deletions. Measured over
+  stores written by the extractors: precision about 54% to 60% with nothing lost (world 7); over stores the store-aware
+  writer wrote it finds almost nothing to close (rounds 3-4), so it is a cleanup for 1.x stores, not a default. The CLI:
+  `consolidate --close-generic-entities --close-unsaid-preferences [--owner <id>] [--approve <id,id,...>] [--apply]`.
+- **The store-aware writer reinforces what is said again** (AMWRITE001): a turn that says a stored fact or preference again
+  is answered "confirm" with its id, in the same call, and the library counts it as said again (one more mention, confidence
+  by `MemoryOptions.ConfidenceReinforcementAlpha`) instead of writing nothing. Before, the writer's rule "what is already
+  stored is not stored again" left every memory at one mention. A preference reinforced by dedup now counts the mention
+  too. World 6, three runs each: 24-26 repeats reinforced a store; three-judge precision 97.34% against 97.67%, stale 0.67
+  against 0.33, complete recall 73.4% against 76.4% (within the registered limit, at its edge).
+- **The store-aware writer ends what an event ends, and lets a one-off end with its day** (AMWRITE001): a move, a death, a
+  birth, a wedding, a breakup, a new job or a retirement replaces the stored state it ends (one replace for each, even when
+  the person is named by a role; only the person's own event counts), and a plan or a state true only for a short while is
+  stored with "until", the end of its validity, while something that happened stays true with its date. The update judge's
+  named question (System One's and the host model's, word for word) now also reads a death, a marriage, a move or a birth
+  as ending the state the person was in. Scenario suite (three repeats): one-offs 0/6 to 6/6, events said on their day kept
+  6/6; a death's closing confirmed 5 of 6 (0 before), near the judge's bar.
+- **The Recommended preset shows what a recalled fact replaced** (AMREC001): `ResolveSupersessions` is on in
+  `MemoryOptions.CreateRecommended()`, so "leads a team of five (since 2023-10-24; previously a team of 4)" answers a
+  question about the earlier value; a correction is never shown as "previously", and neither is a value the current one
+  only restates more fully. LongMemEval knowledge-update, one user turn at a time: 63 of 78 without, 72 and 71 with.
+- **The store-aware writer confirms only a repeat that adds nothing**: said again with a reason, goal, detail, number,
+  name or date, the stored memory is replaced by the fuller one (HaluMem person 1: the confirm had swallowed updates;
+  storage F1 0.808 to 0.862 with this rule).
+- **The store-aware writer can end a stored connection** (AMWRITE001): a replace or correct may name a stored relationship,
+  from a fact ("got married" ends "engaged to") or from a relationship (`ExtractedRelationship.ReplacesId`, new); the update
+  judge is asked the same named question and, on a confirm, the relationship is ended (its valid-until set; the edge stays
+  as history), even when its replacement cannot be stored (an endpoint the store does not hold). The writer is now also
+  shown the live connections of the people it finds by meaning, not only of those named exactly. Scenario suite: a move
+  ends "lives in" 0/3 to 3/3, a wedding ends "engaged to" 0/3 to 2/3, a cousin's wedding ends nothing (3/3).
+- **The store-aware writer asks a third time** before a turn fails or falls back to the extractors: an answer without JSON
+  is asked again with twice the room (as before) and once more at that room. Over 3,634 turns of the Dreaming jar's store
+  runs the first answer held no JSON 104 times and the second 10, each a model that reasoned through its whole room and
+  answered nothing; a fresh call rarely repeats it, so the turns lost or handed to the extractors fall from about 0.28%
+  to an expected 0.03%, for one more call on 0.3% of turns. A turn whose writer answers is unchanged.
+- **The store-aware memory writer** (`LlmExtractionOptions.UseMemoryWriter`, experimental `AMWRITE001`, off). Each turn
+  of one user message is written by one call that sees the owner's most relevant stored memories and proposes only what
+  is new, what replaces or corrects a stored memory (naming it), or nothing; its closings apply only when the update
+  judge confirms them (`ExtractionOptions.NamedClosingThreshold`, 0.60). Measured on two fresh twelve-session worlds:
+  90.8% and 87.8% of what it stored was right, against the extractors' 42.3% and 39.1%. A turn whose writer call fails
+  is written by the extractors instead, and the step down is logged, tagged on the extraction span
+  (`memory.write.fallback`) and reported (`ExtractionStageResult.WriterFallbackReason`);
+  `ExtractionOptions.FallBackToExtractorsWhenWriterFails = false` keeps the earlier behaviour (the turn stores nothing
+  and its outcomes say why).
+- **The host's chat model as the update judge's second tier** (`LlmExtractionOptions.ChatModelUpdateJudge`,
+  `IMemoryUpdateJudgeFallback`; experimental `AMWRITE001`; on in the Recommended preset): the closings the store-aware
+  writer names are confirmed by the host's chat model, asked the gate's question word for word, when no outside judge
+  answers (none registered, switched off, or it fails). Measured on world 6, three store runs each: stale values 0.33 a
+  store against JEV's 0.33, complete recall 76.4% against 75.0%, precision 97.7% against 97.9%, for about 0.2 chat calls
+  a turn more; with no judge at all, 16 replaced values a store stay live. The extractors' similarity path keeps its own
+  judge.
+- **Each leg of memory says the tier it runs at** (`IMemoryTiers`, `IMemoryTierSource`, `MemoryTier`; experimental
+  `AMREC001`): storage (the writer with or without the update judge, or the extractors, and what a failed writer call
+  falls back to), retrieval (the gate's judges, or the similarity floor and why) and dreaming (off). Logged once on the
+  first write (`Memory tiers: ...`) and available to a host at any time.
+- **A judge that keeps failing is left out for a cool-down** (`MemoryGateOptions.JudgeFailuresBeforeCooldown`, 3, and
+  `JudgeCooldown`, one minute; experimental `AMGATE001`). After three failed calls in a row the gate and the update judge
+  stop calling that judge for a minute, then ask it once: an answer brings it back. Meanwhile recall takes the similarity
+  floor when no judge is left and the update judge closes nothing; the log, the span (`memory.judge.cooldown`,
+  `memory.judge.skipped`, the gate's fallback `cooldown`) and `MemoryGateTrace` say so. Before, a judge that was down was
+  asked on every turn (a local judge not running cost about 2 s each time). 0 restores that.
+- **The Recommended preset** (experimental `AMREC001`): `MemoryOptions.CreateRecommended()` (the Conversational preset
+  plus `Extraction.BitemporalChanges`), `LlmExtractionOptions.ApplyRecommended()` (the Conversational extraction half
+  plus the store-aware writer) and `MemoryGateOptions.ApplyRecommended()` (the retrieval memory router and the update
+  judge; the judge endpoint is the host's). Opt-in; the Conversational preset and the defaults are unchanged. Unlike
+  the Conversational preset, its contents may change before 2.0. Validation packs accept `"preset": "recommended"`
+  and the LongMemEval harness `--preset recommended` (its batched preparation does not exercise the writer, and its
+  report says so).
+
 ## [1.9.0] - 2026-10-05
 
 **Stores written before keep their closings.** Facts closed before `BitemporalChanges` was turned on carry no reason and

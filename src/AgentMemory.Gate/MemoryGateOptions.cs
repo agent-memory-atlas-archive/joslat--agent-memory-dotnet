@@ -86,7 +86,37 @@ public sealed class MemoryGateOptions
 
     /// <summary>
     /// Whether the write path asks the first judge whether each new fact or preference replaces a stored one
-    /// (<c>ExtractionOptions.UpdateJudgeThreshold</c>, 0.65). Off: the write path without a judge.
+    /// (<c>ExtractionOptions.UpdateJudgeThreshold</c>, 0.65), and, with the store-aware writer (AMWRITE001), whether each
+    /// closing it names is one (<c>ExtractionOptions.NamedClosingThreshold</c>, 0.60). Off: the write path without a judge,
+    /// and the writer's closings are not applied unless the host's chat model judges them
+    /// (<c>LlmExtractionOptions.ChatModelUpdateJudge</c>, which also steps in when this judge fails).
     /// </summary>
     public bool UpdateJudge { get; set; }
+
+    /// <summary>
+    /// A judge that failed this many calls in a row (an error, no connection, or the HTTP client's own timeout) is left out
+    /// for <see cref="JudgeCooldown"/>, then asked once: an answer brings it back, another failure leaves it out for another
+    /// cool-down. Meanwhile recall goes on without it (the floor when no judge is left) and the update judge closes nothing;
+    /// the log, the span and the gate's trace say so. 3 by default; 0 asks every judge on every call, as before. Not counted:
+    /// a recall cut by <see cref="Timeout"/>, which already caps what a slow judge costs.
+    /// </summary>
+    public int JudgeFailuresBeforeCooldown { get; set; } = 3;
+
+    /// <summary>How long a judge that kept failing is left out before it is asked again (<see cref="JudgeFailuresBeforeCooldown"/>).</summary>
+    public TimeSpan JudgeCooldown { get; set; } = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// The gate's half of the Recommended preset (<c>MemoryOptions.CreateRecommended()</c>): the judge fills the prompt
+    /// (<see cref="MemoryGateMode.Judge"/>) and the write path asks it about replacements and the writer's closings
+    /// (<see cref="UpdateJudge"/>). The judges themselves are the host's to add (<see cref="Judges"/>, or the configuration
+    /// section): with none, recall falls back to <see cref="MemoryGateMode.Floor"/>, and the writer's closings are confirmed
+    /// by the host's chat model when the extraction half of the preset is on (<c>LlmExtractionOptions.ApplyRecommended()</c>).
+    /// Returns this instance.
+    /// </summary>
+    public MemoryGateOptions ApplyRecommended()
+    {
+        Mode = MemoryGateMode.Judge;
+        UpdateJudge = true;
+        return this;
+    }
 }

@@ -1,4 +1,4 @@
-﻿using AgentMemory.Neo4j.Infrastructure;
+﻿﻿using AgentMemory.Neo4j.Infrastructure;
 
 namespace AgentMemory.Neo4j.Queries;
 
@@ -292,6 +292,20 @@ internal static class FactQueries
             : includeShared ? " AND (f.owner_id = $ownerId OR f.owner_id IS NULL)"
                             : " AND f.owner_id = $ownerId";
         return $"MATCH (f:Fact) WHERE f.subject = $subject{owner} RETURN f";
+    }
+
+    /// <summary>
+    /// AMWRITE001. The live facts whose subject, predicate or object contains one of <c>$names</c> (lower-cased by the
+    /// caller), oldest first: what the store-aware writer is shown about the people and things a turn names.
+    /// </summary>
+    public static string FindMentioning(bool hasOwnerFilter, bool includeShared)
+    {
+        var owner = !hasOwnerFilter ? string.Empty
+            : includeShared ? " AND (f.owner_id = $ownerId OR f.owner_id IS NULL)"
+                            : " AND f.owner_id = $ownerId";
+        return "MATCH (f:Fact) WHERE f.invalidated_at IS NULL AND f.merged_into IS NULL" + owner
+            + " AND any(n IN $names WHERE toLower(f.subject) CONTAINS n OR toLower(f.predicate) CONTAINS n OR toLower(f.object) CONTAINS n)"
+            + " RETURN f ORDER BY f.created_at, f.id LIMIT $limit";
     }
 
     /// <summary>K-4 (38.2). <see cref="GetBySubject"/>'s shape on the object side.</summary>
@@ -945,12 +959,19 @@ internal static class FactQueries
     /// per-fact cap is applied inside the collect so a long chain cannot blow up the payload.
     /// </para>
     /// <para>
+    /// <b>Only what held, never what was wrong.</b> A correction also writes <c>:SUPERSEDED_BY</c>, but its
+    /// loser was wrong all along (<c>invalidated_reason = 'correction'</c>): rendered as "previously …" it
+    /// would put a value the person withdrew back in front of the agent. A loser closed before the reason was
+    /// recorded reads as a change, as it did.
+    /// </para>
+    /// <para>
     /// (A const, so it IS in the Cypher snapshot inventory — it is a fixed query with no variants.)
     /// </para>
     /// </remarks>
     public const string GetSupersessionPredecessors = @"
             MATCH (prev:Fact)-[:SUPERSEDED_BY]->(cur:Fact)
             WHERE cur.id IN $factIds
+              AND coalesce(prev.invalidated_reason, 'change') <> 'correction'
             WITH cur, prev
             ORDER BY coalesce(prev.valid_until, prev.invalidated_at) DESC
             WITH cur, collect({

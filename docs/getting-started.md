@@ -390,6 +390,57 @@ What it switches on:
 Every option stays individually settable afterwards: the preset returns ordinary options objects. Its contents are
 frozen for a major version.
 
+### 4.6 The Recommended preset (experimental, `AMREC001`)
+
+The Conversational preset, plus what the storage and retrieval research measured as better, switched on together:
+
+```csharp
+#pragma warning disable AMREC001, AMGATE001
+builder.Services.AddNeo4jAgentMemory(
+    MemoryOptions.CreateRecommended(),
+    neo4j => { /* ... */ },
+    llm => llm.ApplyRecommended());
+builder.Services.AddAgentMemoryGate(gate =>
+{
+    gate.ApplyRecommended();
+    gate.Judges.Add(new SystemOneEndpoint { Name = "jev", Endpoint = new Uri("https://api.typesafe.ai/v1/systemone"), KeyVariable = "TYPESAFE_API_KEY" });
+});
+#pragma warning restore AMREC001, AMGATE001
+```
+
+What it adds to the Conversational preset:
+
+- **The store-aware writer** (`LlmExtractionOptions.UseMemoryWriter`, `AMWRITE001`): each turn is written by one call
+  that sees the owner's most relevant stored memories and proposes only what is new, what replaces or corrects a stored
+  memory, or nothing. On two fresh twelve-session worlds, 90.8% and 87.8% of what it stored was right, against 42.3% and
+  39.1% for the extractors on the same turns. When its call fails (the model is down, times out, or answers without
+  JSON twice), the extractors write that turn instead, and the warning, the extraction span (`memory.write.fallback`)
+  and `ExtractionStageResult.WriterFallbackReason` say so; `Extraction.FallBackToExtractorsWhenWriterFails = false`
+  stores nothing for such a turn and records the error instead.
+- **Bitemporal changes** (`Extraction.BitemporalChanges`): a question about the past keeps the value that was true then.
+  The writer was measured with it on.
+- **The host's chat model as the update judge's second tier** (`LlmExtractionOptions.ChatModelUpdateJudge`, `AMWRITE001`):
+  when no outside judge answers (no endpoint, or the endpoint down or left out after failures), the writer's closings are
+  confirmed by the same chat model, asked the gate's question. Measured on world 6: as good as JEV (0.33 stale values a
+  store against 0.33, precision 97.7% against 97.9%) for about 0.2 chat calls a turn more; with no judge at all, 16
+  replaced values a store stay live.
+- **With a judge endpoint** (`AgentMemory.Gate`, `AMGATE001`): the update judge confirms the writer's closings, and the
+  retrieval memory router judges each memory found for the prompt (every needed memory reached the prompt on 96.1% and
+  96.5% of turns, against 67.6% and 76.8% for the similarity floor, with less than half the memory tokens). Without an
+  endpoint, recall uses the similarity floor and the host's chat model confirms the writer's closings.
+
+**What runs, said once.** The library logs each leg's tier on its first write, for example
+`Memory tiers: storage: writer + update judge (a failed writer call falls back to the extractors); retrieval: judge (jev); dreaming: off`,
+and a host can ask for it at any time (`IMemoryTiers`, `AMREC001`): without a judge endpoint it says
+`retrieval: similarity floor (Judge mode has no judge configured)`, and while every judge is left out after repeated
+failures it says so.
+
+Leave `AgentFrameworkOptions.DeferQuestionTurns` off with it: the writer takes one user message at a time and writes
+nothing for a question, and a held question released with the next turn would go to the extractors instead.
+
+Unlike the Conversational preset, its contents may change before 2.0, as the measurements on the library's other
+benchmarks come in; 2.0 is planned to make them the defaults.
+
 ---
 
 ## 5. Microsoft Agent Framework Integration

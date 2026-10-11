@@ -322,6 +322,52 @@ switch (args.FirstOrDefault())
         return await new AgentMemory.RouterArena.Record.StoreJar(Console.Out).RunAsync(Get("world") ?? Path.Combine(fixtures, "world.pack.json"), picked,
             Get("out") ?? Path.Combine(runs, "store-jar.json"), dryRun, Get("owner") ?? "marta");
     }
+    case "scenarios":
+    {
+        // The lucid writer's scenario suite: short conversations checked on the stored graph (strategy arena/scenarios/).
+        var file = Get("file") ?? Path.Combine(strategy, "memoryrouter", "arena", "scenarios", "lucid-writer.json");
+        return await new AgentMemory.RouterArena.Record.ScenarioSuite(Console.Out).RunAsync(file,
+            int.Parse(Get("repeat") ?? "1", CultureInfo.InvariantCulture),
+            Get("out") ?? Path.Combine(strategy, "performance", "runs", "scenarios", "lucid-writer.json"), dryRun,
+            int.Parse(Get("parallel") ?? "6", CultureInfo.InvariantCulture));
+    }
+    case "halumem":
+    {
+        // HaluMem (strategy/memoryrouter/halumem-plan.md): one person's sessions through the Recommended preset; what each
+        // session stored and what recall returns for its update points and questions. --person N (1-based), --sessions a-b.
+        var range = (Get("sessions") ?? "1-10").Split('-');
+        var person = int.Parse(Get("person") ?? "1", CultureInfo.InvariantCulture);
+        return await new AgentMemory.RouterArena.Record.HaluMemSessions(Console.Out).RunAsync(
+            Get("halumem") ?? Path.Combine(strategy, "performance", "fixtures", "halumem", "HaluMem-Medium.jsonl"), person,
+            int.Parse(range[0], CultureInfo.InvariantCulture), int.Parse(range[^1], CultureInfo.InvariantCulture),
+            Get("out") ?? Path.Combine(strategy, "performance", "runs", "halumem", $"halumem-p{person:00}.json"), dryRun,
+            (Get("history") ?? "off") == "on");
+    }
+    case "longmemeval":
+    {
+        // LongMemEval one user turn at a time (strategy arena/longmemeval_score.py answers and judges): --types a,b
+        // (question types), --limit N, --writer on|off, --parallel N; --longmemeval the oracle (or another) file.
+        return await new AgentMemory.RouterArena.Record.LongMemEvalSessions(Console.Out).RunAsync(
+            Get("longmemeval") ?? "C:/git/AgentEval/src/AgentEval.Memory/Data/longmemeval/longmemeval_oracle.json",
+            (Get("types") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            int.Parse(Get("limit") ?? "0", CultureInfo.InvariantCulture), (Get("writer") ?? "on") != "off",
+            int.Parse(Get("parallel") ?? "6", CultureInfo.InvariantCulture),
+            Get("out") ?? Path.Combine(strategy, "performance", "runs", "longmemeval", "longmemeval-turns.json"), dryRun,
+            (Get("history") ?? "off") == "on");
+    }
+    case "store-sessions":
+    {
+        // A world through the library (world3-design.md): one store, every turn in order at its session's date. --set w3 (default)
+        // or w4 (round 3's test, world 4: run only under prereg-round3.md); the world's folder holds world<N>.pack.json and sets/.
+        var worldSet = Get("set") ?? "w3";
+        var worldName = $"world{worldSet[1..]}";
+        var worldDir = Get("world3") ?? Get("world-dir") ?? Path.Combine(strategy, "performance", "fixtures", "routing", worldName);
+        var form = Get("form") ?? "today";
+        return await new AgentMemory.RouterArena.Record.StoreSessions(Console.Out).RunAsync(Path.Combine(worldDir, $"{worldName}.pack.json"),
+            Path.Combine(worldDir, "sets"), form, Get("out") ?? Path.Combine(strategy, "performance", "runs", "2026-10-04_eye", "storage",
+                worldName, $"store-sessions-{form}.json"), dryRun, Limit(), set: worldSet, ownerName: Get("owner-name"),
+                recall: args.Contains("--recall"), consolidate: args.Contains("--consolidate"));
+    }
     case "probe-relationships":
     {
         // 40.91: every relationship as stored, with its owner, validity and both ends, read straight from the graph.

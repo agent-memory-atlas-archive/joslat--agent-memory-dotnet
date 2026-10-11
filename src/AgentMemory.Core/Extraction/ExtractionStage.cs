@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using AgentMemory.Abstractions.Diagnostics;
@@ -23,9 +24,11 @@ internal sealed class ExtractionStage : IExtractionStage
     private readonly IReadOnlyList<IPreferenceExtractor> _preferenceExtractors;
     private readonly IReadOnlyList<IRelationshipExtractor> _relationshipExtractors;
     private readonly IReadOnlyList<IUnifiedMemoryExtractor> _unifiedExtractors;
+    private readonly IReadOnlyList<IMemoryWriter> _writers;
     private readonly IEntityResolver _entityResolver;
     private readonly ExtractionOptions _options;
     private readonly ILogger<ExtractionStage> _logger;
+    private readonly Tiers.MemoryTierReport? _tiers;
 
     public ExtractionStage(
         IEnumerable<IEntityExtractor> entityExtractors,
@@ -35,8 +38,14 @@ internal sealed class ExtractionStage : IExtractionStage
         IEnumerable<IUnifiedMemoryExtractor> unifiedExtractors,
         IEntityResolver entityResolver,
         IOptions<ExtractionOptions> extractionOptions,
-        ILogger<ExtractionStage> logger)
+        ILogger<ExtractionStage> logger,
+        // Optional and last: without an enabled writer the stage is exactly what it was.
+        IEnumerable<IMemoryWriter>? writers = null,
+        // Optional: each leg's tier, logged once on the first write (AMREC001).
+        IMemoryTiers? tiers = null)
     {
+        _writers = (writers ?? []).ToList().AsReadOnly();
+        _tiers = tiers as Tiers.MemoryTierReport;
         _entityExtractors = entityExtractors.ToList().AsReadOnly();
         _factExtractors = factExtractors.ToList().AsReadOnly();
         _preferenceExtractors = preferenceExtractors.ToList().AsReadOnly();
@@ -90,6 +99,7 @@ internal sealed class ExtractionStage : IExtractionStage
         UnifiedExtractionResult? preExtracted,
         CancellationToken cancellationToken)
     {
+        _tiers?.LogOnce(_logger);
         var messages = window.Targets;
 
         // Targets only, never the context (E2). A context turn in here would become an EXTRACTED_FROM
@@ -128,12 +138,58 @@ internal sealed class ExtractionStage : IExtractionStage
         var unifiedExtractor = typesToExtract != ExtractionTypes.None
             ? _unifiedExtractors.FirstOrDefault(extractor => extractor.IsEnabled)
             : null;
+        // A store-aware writer, when one is enabled, decides instead of the extractors (AMWRITE001), for a window with exactly
+        // one user message: the turn it was measured on. A window of several (a whole session, held question turns released
+        // together) or of none (a document, assistant content) goes to the extractors as configured. Not on a pre-extracted
+        // result: that call is already paid for, and its items were extracted without the store.
+        var writer = typesToExtract != ExtractionTypes.None && preExtracted is null
+            ? _writers.FirstOrDefault(candidate => candidate.IsEnabled)
+            : null;
+        if (writer is not null && messages.Count(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase)) != 1)
+        {
+            _logger.LogDebug(
+                "The memory writer takes one user message at a time; this window has {Count}, so the extractors write it.",
+                messages.Count(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase)));
+            writer = null;
+        }
+        // The writer is asked first; when its call fails and the fallback is on, the turn goes on to the extractors below as if
+        // no writer were enabled (and is persisted as an extractor turn): the step down is logged, tagged and reported.
+        (UnifiedExtractionResult Result, IReadOnlyList<IngestionItemOutcome> Outcomes)? written = null;
+        string? writerFallback = null;
+        if (preExtracted is null && writer is not null)
+        {
+            var attempt = await WriteSafeAsync(writer, window, scope, typesToExtract, cancellationToken).ConfigureAwait(false);
+            if (attempt.Outcomes.Count > 0 && _options.FallBackToExtractorsWhenWriterFails)
+            {
+                writerFallback = attempt.Outcomes[0].ErrorMessage ?? "the memory writer failed";
+                _logger.LogWarning(
+                    "The memory writer failed ({Reason}); the extractors write this turn instead.", writerFallback);
+                Activity.Current?.SetTag("memory.write.fallback", "extractors");
+                Activity.Current?.AddEvent(new ActivityEvent("memory.write.fallback", tags: new ActivityTagsCollection
+                {
+                    ["memory.write.fallback.to"] = "extractors", ["memory.write.fallback.reason"] = writerFallback,
+                }));
+                writer = null;
+            }
+            else
+            {
+                written = attempt;
+            }
+        }
         if (preExtracted is not null)
         {
             entityRun = CompletedRun(typesToExtract.HasFlag(ExtractionTypes.Entities) ? preExtracted.Entities : []);
             factRun = CompletedRun(typesToExtract.HasFlag(ExtractionTypes.Facts) ? preExtracted.Facts : []);
             prefRun = CompletedRun(typesToExtract.HasFlag(ExtractionTypes.Preferences) ? preExtracted.Preferences : []);
             relRun = CompletedRun(typesToExtract.HasFlag(ExtractionTypes.Relationships) ? preExtracted.Relationships : []);
+        }
+        else if (written is { } w)
+        {
+            unifiedOutcomes = w.Outcomes;
+            entityRun = CompletedRun(typesToExtract.HasFlag(ExtractionTypes.Entities) ? w.Result.Entities : []);
+            factRun = CompletedRun(typesToExtract.HasFlag(ExtractionTypes.Facts) ? w.Result.Facts : []);
+            prefRun = CompletedRun(typesToExtract.HasFlag(ExtractionTypes.Preferences) ? w.Result.Preferences : []);
+            relRun = CompletedRun(typesToExtract.HasFlag(ExtractionTypes.Relationships) ? w.Result.Relationships : []);
         }
         else if (unifiedExtractor is not null)
         {
@@ -401,6 +457,10 @@ internal sealed class ExtractionStage : IExtractionStage
             FactExtractorCount = _factExtractors.Count,
             PreferenceExtractorCount = _preferenceExtractors.Count,
             RelationshipExtractorCount = _relationshipExtractors.Count,
+            WrittenByWriter = writer is not null,
+            ConfirmedFactIds = writer is not null && written is { } confirmed ? confirmed.Result.ConfirmedFactIds : [],
+            ConfirmedPreferenceIds = writer is not null && written is { } confirmedToo ? confirmedToo.Result.ConfirmedPreferenceIds : [],
+            WriterFallbackReason = writerFallback,
             Outcomes = outcomes
         };
     }
@@ -439,6 +499,42 @@ internal sealed class ExtractionStage : IExtractionStage
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unified memory extraction threw — continuing with empty results.");
+            var outcomes = new List<IngestionItemOutcome>(4);
+            AddUnifiedFailure(outcomes, typesToExtract, ExtractionTypes.Entities,
+                MemoryItemKind.Entity, "entity", MemoryErrorCodes.EntityExtractionFailed, ex);
+            AddUnifiedFailure(outcomes, typesToExtract, ExtractionTypes.Facts,
+                MemoryItemKind.Fact, "fact", MemoryErrorCodes.FactExtractionFailed, ex);
+            AddUnifiedFailure(outcomes, typesToExtract, ExtractionTypes.Preferences,
+                MemoryItemKind.Preference, "preference", MemoryErrorCodes.PreferenceExtractionFailed, ex);
+            AddUnifiedFailure(outcomes, typesToExtract, ExtractionTypes.Relationships,
+                MemoryItemKind.Relationship, "relationship", MemoryErrorCodes.RelationshipExtractionFailed, ex);
+            return (new UnifiedExtractionResult(), outcomes);
+        }
+    }
+
+    /// <summary>
+    /// The writer's call, failing as the unified extractor's does: a writer that throws stores nothing for the turn and
+    /// records why, never a half-written turn.
+    /// </summary>
+    private async Task<(UnifiedExtractionResult Result, IReadOnlyList<IngestionItemOutcome> Outcomes)> WriteSafeAsync(
+        IMemoryWriter writer,
+        ExtractionWindow window,
+        MemoryScope? scope,
+        ExtractionTypes typesToExtract,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await writer.WriteAsync(new MemoryWriteRequest(window, scope), cancellationToken).ConfigureAwait(false),
+                Array.Empty<IngestionItemOutcome>());
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "The memory writer threw; nothing is stored for this turn.");
             var outcomes = new List<IngestionItemOutcome>(4);
             AddUnifiedFailure(outcomes, typesToExtract, ExtractionTypes.Entities,
                 MemoryItemKind.Entity, "entity", MemoryErrorCodes.EntityExtractionFailed, ex);
