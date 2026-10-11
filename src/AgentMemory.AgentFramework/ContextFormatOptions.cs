@@ -112,7 +112,7 @@ public sealed class ContextFormatOptions
     /// </para>
     /// <para>
     /// <b>This is not a new idea; it is a fix promoted out of the benchmark.</b> The measured
-    /// procedural-benefit run (see <c>docs/reviews/procedural-benefit-result.md</c>) appended this
+    /// procedural-benefit run (see <c>docs/performance/procedural-benefit-result.md</c>) appended this
     /// sentence in its own harness, so the published one-tool-call saving was obtained <i>with</i> it.
     /// Until now the product shipped the contradiction and only the benchmark had the remedy, which
     /// means a consumer enabling procedural memory got neither the measured behaviour nor a warning.

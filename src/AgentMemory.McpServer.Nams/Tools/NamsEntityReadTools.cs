@@ -8,7 +8,7 @@ namespace AgentMemory.McpServer.Nams.Tools;
 /// Read-only NAMS entity-graph tools. Registered by <c>AddNamsAgentMemoryMcpTools</c>. Unlike
 /// <see cref="NamsRecallTools"/>, these resolve <see cref="INamsClient"/> directly rather than through a
 /// dedicated public service -- see
-/// docs/reviews/NAMS_McpEntityReasoningTools_PlanningAndImplementationPlan.md for why a service layer isn't
+/// strategy/NAMS/implementation/NAMS_McpEntityReasoningTools_PlanningAndImplementationPlan.md for why a service layer isn't
 /// warranted for this operation tier.
 /// </summary>
 [McpServerToolType]

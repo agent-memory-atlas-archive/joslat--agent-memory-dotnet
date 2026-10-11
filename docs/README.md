@@ -2,6 +2,11 @@
 
 Start with **[getting-started.md](getting-started.md)** to install and run.
 
+This folder contains public usage guides, contracts, architecture, security guidance, and reproducible
+performance documentation. Keep implementation plans, phase logs, research snapshots, experiment
+preregistrations, and unpublished pilot results in the private `strategy/` repository, organized by topic.
+Public documentation must remain usable without that repository.
+
 | Doc | What it covers |
 |-----|----------------|
 | [getting-started.md](getting-started.md) | Prerequisites, install, DI config, first memory store, multi-tenant / multi-database setup |
@@ -18,3 +23,6 @@ Start with **[getting-started.md](getting-started.md)** to install and run.
 | [performance/README.md](performance/README.md) | What a turn costs — the two phases (recall before the model, ingestion after), what is and isn't measured, tuning levers, and how to reproduce the numbers |
 | [security/threat-model.md](security/threat-model.md) | Threat table — attack vectors, mitigations, residual risk, and test coverage for each; read before production use |
 | [security/production-checklist.md](security/production-checklist.md) | Pre-production hardening checklist |
+
+Schema-extension contracts are indexed in [extensions/README.md](extensions/README.md).
+For shared chat and embedding setup, see [configuration/inference-providers.md](configuration/inference-providers.md).

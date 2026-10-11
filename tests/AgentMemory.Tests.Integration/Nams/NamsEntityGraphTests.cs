@@ -8,7 +8,7 @@ namespace AgentMemory.Tests.Integration.Nams;
 /// Live tests for the Phase 10g TCK Platinum entity-feedback/graph additions:
 /// <see cref="INamsClient.SetEntityFeedbackAsync"/>, <see cref="INamsClient.GetEntityGraphAsync"/>, and
 /// <see cref="INamsClient.ExpandGraphAsync"/>. See
-/// <c>docs/reviews/NAMS_Phase10g_EntityFeedbackGraph_PlanningAndImplementationPlan.md</c> for the design.
+/// <c>strategy/NAMS/implementation/NAMS_Phase10g_EntityFeedbackGraph_PlanningAndImplementationPlan.md</c> for the design.
 /// Most tests deliberately reuse an existing entity discovered via the already-shipped
 /// <see cref="INamsClient.ListEntitiesAsync"/> rather than creating one -- non-destructively scoring/reading an
 /// existing entity matches the same pattern the Phase 10e spike itself used.

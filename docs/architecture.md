@@ -178,7 +178,7 @@ now requires the .NET 10 runtime. The move surfaced three known-vulnerable trans
 resolution (fixed: Testcontainers.Neo4j 4.11.0→4.14.0, two pinned patches; none reached a shipped
 package). **No net9→net10 performance claim is made or supportable**: the hermetic perf harness gates
 on query counts (unchanged, 3/3 passing) and two runs of identical code differed by 12 points of wall
-time (see `docs/reviews/net10-performance-comparison.md`).
+time in an internal comparison.
 
 ---
 
@@ -806,7 +806,7 @@ Promotion had **never worked** before 2026-08-14: `PromoteAsync` wrote `"Procedu
 filter compared against lowercase `"procedure"`, so promoted traces read back as `Episode`, were
 invisible to `proceduresOnly` recall, and were pruned like any episode — fixed by centralising the
 stored spelling and `toLower()`-normalising the Cypher comparisons (see
-`docs/reviews/procedure-retrieval-precision-result.md` §1). Old rows work without migration.
+`docs/performance/procedure-retrieval-precision-result.md` §1). Old rows work without migration.
 
 **Architecture-relevant caveat** from that instrument: the shipped `RecallOptions.MinSimilarityScore`
 default (0.7) sits in a **dead zone** for procedure retrieval — every threshold 0.00-0.86 behaves
@@ -1078,7 +1078,7 @@ message. Phase 4 makes that role configurable and ties it to the trust signal Ph
 its *Task* and **dropped its Outcome** — so procedural memory (§3.3.1) was retrievable, owner-scoped,
 prune-exempt, and mute on the Agent Framework surface: the injected block said "you have done this
 before" and nothing about *how* (a product defect found while wiring the procedural-benefit
-measurement; see `docs/reviews/procedural-benefit-result.md` §3). When enabled, outcomes render as
+measurement; see `docs/performance/procedural-benefit-result.md` §3). When enabled, outcomes render as
 "task: outcome", admitted and delimited like every other recalled item.
 
 Companion: `ContextFormatOptions.ProcedureTrustClause` — the #92 context prefix instructs the model to
@@ -1320,7 +1320,7 @@ Two consequences worth stating rather than implying:
 | `:Entity` | `Entity` | `id`, `name`, `canonical_name`, `type`, `subtype`, `description`, `confidence`, `embedding`, `aliases`, `attributes`, `source_message_ids`, `location`, `owner_id`, `owner_key` (`coalesce(owner_id, '*')`, backfilled at bootstrap), `metadata` |
 | `:Fact` | `Fact` | `id`, `subject`, `predicate`, `object`, `confidence`, `valid_from`, `valid_until`, `valid_from_precision`, `valid_until_precision` (`year`/`month`/`day`/`instant`, absent = unspecified), `occurred_on`, `occurred_on_precision` (the day a one-off event happened), `embedding`, `source_message_ids`, `created_at`, `metadata` |
 | `:Preference` | `Preference` | `id`, `category`, `preference`, `context`, `confidence`, `embedding`, `source_message_ids`, `created_at`, `metadata` |
-| `:ReasoningTrace` | `ReasoningTrace` | `id`, `session_id`, `task`, `outcome`, `success`, `trace_kind`, `started_at`, `completed_at`, `task_embedding`, `metadata` — `trace_kind` (values `episode`/`procedure`, stored lowercase) marks promotion to a reusable procedure (§3.3.1; the promote path's `"Procedure"` casing bug meant promotion **never worked** until fixed 2026-08-14 — Cypher comparisons are now `toLower()`'d, so old rows work without migration; see `docs/reviews/procedure-retrieval-precision-result.md` §1.1). `success` is **tri-state** (`bool?`, `null` = unrecorded — renderers must not show `null` as failure) |
+| `:ReasoningTrace` | `ReasoningTrace` | `id`, `session_id`, `task`, `outcome`, `success`, `trace_kind`, `started_at`, `completed_at`, `task_embedding`, `metadata` — `trace_kind` (values `episode`/`procedure`, stored lowercase) marks promotion to a reusable procedure (§3.3.1; the promote path's `"Procedure"` casing bug meant promotion **never worked** until fixed 2026-08-14 — Cypher comparisons are now `toLower()`'d, so old rows work without migration; see `docs/performance/procedure-retrieval-precision-result.md` §1.1). `success` is **tri-state** (`bool?`, `null` = unrecorded — renderers must not show `null` as failure) |
 | `:ReasoningStep` | `ReasoningStep` | `id`, `trace_id`, `step_number`, `thought`, `action`, `observation`, `embedding`, `metadata` |
 | `:ToolCall` | `ToolCall` | `id`, `step_id`, `tool_name`, `arguments`, `result`, `status`, `duration_ms`, `error`, `metadata` |
 | `:Tool` | *(aggregate)* | `name`, `created_at`, `total_calls` |
@@ -1566,9 +1566,9 @@ These rules are inviolable. Violation of any rule is a blocking review finding.
 - ✅ Neo4j .csproj: Neo4j.Driver 6.3.0 + M.E.DI/Logging/Options (no Microsoft.Agents.*, no MCP SDK)
 - ✅ `grep` for `Microsoft.Agents` across `src/AgentMemory.Neo4j/` returns zero matches
 - ✅ GraphRAG retrieval (`Neo4jGraphRagContextSource`, `IRetriever`, `VectorRetriever`, `FulltextRetriever`, `HybridRetriever`) lives inside `AgentMemory.Neo4j` — no separate `GraphRagAdapter` package exists
-- ✅ `AgentMemory.Nams` .csproj: `Microsoft.Extensions.DependencyInjection.Abstractions` + `Microsoft.Extensions.Options` + `Microsoft.Extensions.Logging.Abstractions` + `Microsoft.Extensions.Http`, zero `<ProjectReference>` elements (B9) — as of Phase 2 it also has a low-level REST client, retry policy, and error model (its own `HttpClient`-based implementation, no dependency on the external `Neo4j.AgentMemory` TCK client — see `docs/reviews/NAMS_Phase2_LowLevelClientAdapter_PlanningAndImplementationPlan.md`), and as of Phase 3 an identity/conversation-resolution subsystem (`INamsConversationStateStore`/`INamsConversationResolver` — a host/Phase-6 extension point for durable, cross-process-safe mapping storage — see `docs/reviews/NAMS_Phase3_IdentityAndConversationMapping_PlanningAndImplementationPlan.md`), and as of Phase 4 a recall/context-mapping subsystem (`INamsRecallService` — retrieves and neutrally maps hosted reflections/observations/messages/entities, deliberately unescaped/undelimited/ungated since this package cannot reference the Abstractions/Core/AgentFramework types that gating requires; see `docs/reviews/NAMS_Phase4_RecallAndContextMapping_PlanningAndImplementationPlan.md`), and as of Phase 5 a post-turn persistence subsystem (`INamsPersistenceService` — a single bulk message write per turn, classified as `Persisted`/`Failed`/`UnknownWriteOutcome`, finally reading the `NamsOptions.PersistenceFailureMode` field that had existed unused since Phase 1; see `docs/reviews/NAMS_Phase5_PostTurnPersistence_PlanningAndImplementationPlan.md`), and as of the Phase 10b follow-up an `InternalsVisibleTo` grant to `AgentMemory.Tests.Integration` (mirroring `AgentMemory.AgentFramework`'s identical existing grant) so the live-integration suite can reach the internal `INamsClient.DeleteConversationAsync` — invisible to B9 enforcement either way, since `InternalsVisibleTo` is an outbound grant, not a reference; listed in `eng/release-packages.txt` (mandatory for every `src/*` package)
-- ✅ `AgentMemory.AgentFramework.Nams` (Phase 6, new 14th `src/*` package, B10): `NamsMemoryContextProvider` finally wires Phases 3-5's raw, ungated output through the same #92 protections (escaping/delimiting via `AgentMemory.Core.Security.RecalledMemoryDelimiter`/`RecalledMessageRoleGate`, admission via `AgentMemory.AgentFramework.Security.IMemoryContextAdmissionPolicy`, trust-level mapping via a 1:1 cast from `NamsRecallProvenance`) the direct backend already applies — see `docs/reviews/NAMS_Phase6_DedicatedMafProvider_PlanningAndImplementationPlan.md`
-- ✅ `AgentMemory.McpServer.Nams` (Phase 8, new 15th `src/*` package, B11): `nams_recall` (read, always registered by `AddNamsAgentMemoryMcpTools`) and `nams_remember` (write, only registered by the separate, explicit `AddNamsAgentMemoryMcpWriteTools` opt-in) delegate through the public `INamsRecallService`/`INamsPersistenceService` — never a raw `userId`/`workspaceId` model argument, only an opaque, already-resolved NAMS conversation ID — see `docs/reviews/NAMS_Phase8_McpTools_PlanningAndImplementationPlan.md`. A later pass (PR #154) wired 9 more `INamsClient` operations in as MCP tools, resolving `INamsClient` directly rather than through a new public service (these sit outside the security-gated recall/persistence pipeline above): `nams_entity_graph`/`nams_expand_graph`/`nams_create_entity`/`nams_entity_feedback` (entity graph) and `nams_record_reasoning_step`/`nams_record_tool_call`/`nams_list_reasoning_steps`/`nams_reasoning_trace`/`nams_entity_provenance` (reasoning/provenance) — 11 tools total, tracked deterministically in `NamsMcpToolRegistry`. Deliberately still excluded: `nams_graph_query` (raw Cypher passthrough), gated behind explicit user go-ahead per `INamsClient.ExecuteCypherQueryAsync`'s own doc comment — see `docs/reviews/NAMS_McpEntityReasoningTools_PlanningAndImplementationPlan.md`
+- ✅ `AgentMemory.Nams` .csproj: `Microsoft.Extensions.DependencyInjection.Abstractions` + `Microsoft.Extensions.Options` + `Microsoft.Extensions.Logging.Abstractions` + `Microsoft.Extensions.Http`, zero `<ProjectReference>` elements (B9) — as of Phase 2 it also has a low-level REST client, retry policy, and error model (its own `HttpClient`-based implementation, no dependency on the external `Neo4j.AgentMemory` TCK client), and as of Phase 3 an identity/conversation-resolution subsystem (`INamsConversationStateStore`/`INamsConversationResolver` — a host/Phase-6 extension point for durable, cross-process-safe mapping storage), and as of Phase 4 a recall/context-mapping subsystem (`INamsRecallService` — retrieves and neutrally maps hosted reflections/observations/messages/entities, deliberately unescaped/undelimited/ungated since this package cannot reference the Abstractions/Core/AgentFramework types that gating requires), and as of Phase 5 a post-turn persistence subsystem (`INamsPersistenceService` — a single bulk message write per turn, classified as `Persisted`/`Failed`/`UnknownWriteOutcome`, finally reading the `NamsOptions.PersistenceFailureMode` field that had existed unused since Phase 1), and as of the Phase 10b follow-up an `InternalsVisibleTo` grant to `AgentMemory.Tests.Integration` (mirroring `AgentMemory.AgentFramework`'s identical existing grant) so the live-integration suite can reach the internal `INamsClient.DeleteConversationAsync` — invisible to B9 enforcement either way, since `InternalsVisibleTo` is an outbound grant, not a reference; listed in `eng/release-packages.txt` (mandatory for every `src/*` package)
+- ✅ `AgentMemory.AgentFramework.Nams` (Phase 6, new 14th `src/*` package, B10): `NamsMemoryContextProvider` finally wires Phases 3-5's raw, ungated output through the same #92 protections (escaping/delimiting via `AgentMemory.Core.Security.RecalledMemoryDelimiter`/`RecalledMessageRoleGate`, admission via `AgentMemory.AgentFramework.Security.IMemoryContextAdmissionPolicy`, trust-level mapping via a 1:1 cast from `NamsRecallProvenance`) the direct backend already applies
+- ✅ `AgentMemory.McpServer.Nams` (Phase 8, new 15th `src/*` package, B11): `nams_recall` (read, always registered by `AddNamsAgentMemoryMcpTools`) and `nams_remember` (write, only registered by the separate, explicit `AddNamsAgentMemoryMcpWriteTools` opt-in) delegate through the public `INamsRecallService`/`INamsPersistenceService` — never a raw `userId`/`workspaceId` model argument, only an opaque, already-resolved NAMS conversation ID. A later pass (PR #154) wired 9 more `INamsClient` operations in as MCP tools, resolving `INamsClient` directly rather than through a new public service (these sit outside the security-gated recall/persistence pipeline above): `nams_entity_graph`/`nams_expand_graph`/`nams_create_entity`/`nams_entity_feedback` (entity graph) and `nams_record_reasoning_step`/`nams_record_tool_call`/`nams_list_reasoning_steps`/`nams_reasoning_trace`/`nams_entity_provenance` (reasoning/provenance) — 11 tools total, tracked deterministically in `NamsMcpToolRegistry`. Deliberately still excluded: `nams_graph_query` (raw Cypher passthrough), gated behind explicit user go-ahead per `INamsClient.ExecuteCypherQueryAsync`'s own doc comment
 
 ---
 
@@ -1676,7 +1676,7 @@ The upstream `neo4j-maf-provider` was built for **MAF 0.3** (pre-GA). Our Phase 
 ### Evaluation Instruments
 
 `tools/AgentMemory.LongMemEval` carries durable measurement seams beyond the benchmark runner (results
-live in `docs/reviews/`; only the components are described here):
+are documented in [performance results](performance/README.md); only the components are described here):
 
 - **`IProceduralTask`** — the pluggable task contract behind `--procedural-benefit`, with three
   implementations (`ProceduralBenchmarkTask`/rail, `ProceduralIncidentTask`, `ProceduralArchiveTask`)
@@ -1692,7 +1692,7 @@ live in `docs/reviews/`; only the components are described here):
   tg-prospective) that made prospective memory (§3.2.7) measurable for the first time (task 26.3).
 - **Query-formulation arm** (`--query-formulation verbatim`) — exists, opt-in and off by default, and
   **retired as a lever** on this corpus; kept because the instrument, not the treatment, is the asset
-  (see `docs/reviews/query-formulation-result.md` §5).
+  (the experiment is summarized in [the memory map](memory-map.md#87-query-formulation--built-fired-and-retired)).
 - **Answer voting** (`--answer-votes N`, default 1 = the historical call byte for byte) — samples N
   answers with distinct seeds and aggregates them, reporting disagreement. Its pre-registered primary
   claim is that the **band narrows** across repeat runs, not that point accuracy rises: on a
@@ -1710,36 +1710,7 @@ live in `docs/reviews/`; only the components are described here):
 
 ---
 
-## 8. Phase Roadmap
-
-| Phase | Name | Objective | Status |
-|---|---|---|---|
-| **0** | Discovery & Design Lock | Freeze architecture, interfaces, graph schema | ✅ Complete |
-| **1** | Core Memory Engine | Framework-agnostic memory core + Neo4j persistence | ✅ **Complete** |
-| **2** | LLM Extraction Pipeline | .NET-native structured extraction using LLMs | ✅ **Complete** |
-| **3** | MAF Adapter | Microsoft Agent Framework integration | ✅ **Complete** |
-| **4** | GraphRAG + Observability | GraphRAG retrieval inside `AgentMemory.Neo4j`, blended context, OpenTelemetry | ✅ **Complete** |
-| **5** | Advanced Extraction | Azure Language, geocoding, enrichment | ✅ **Complete** |
-| **6** | MCP Server | External access via Model Context Protocol | ✅ **Complete** |
-| **7** | Gap Closure (Waves A–C) | Python parity sprint — datetime, sessions, filters, MCP resources | ✅ **Complete** |
-
-### All Phases Complete
-
-All 6 implementation phases plus the gap closure and hardening work are complete. The project ships 14 adapter/library packages plus the `AgentMemory` meta-package — 15 `src/*` projects in all, including the NAMS trio (`AgentMemory.Nams`, `AgentMemory.AgentFramework.Nams`, `AgentMemory.McpServer.Nams`) shipped with NuGet 1.3.0 — with extensive unit and integration test coverage and ~99% functional parity with the Python reference.
-
-### Phase 1 Exit Criteria
-
-- ✅ All repositories implemented with Neo4j persistence
-- ✅ All services unit tested
-- ✅ All repositories integration tested with real Neo4j via Testcontainers
-- ✅ Context assembler functional with configurable budgets
-- ✅ No MAF or GraphRAG dependencies in Core or Abstractions
-- ✅ Schema bootstrap creates all constraints and indexes (12 constraints, 21 property, 6 vector, 1 point, 3 fulltext)
-- ✅ In-process memory engine works without Agent Framework
-
----
-
-## 9. Package Strategy Analysis
+## 9. Package Dependency Reference
 
 **Added:** 2026-04-17
 **Author:** Jose Luis Latorre Millas
@@ -1799,29 +1770,6 @@ Each package exists to prevent a specific unwanted transitive dependency from re
                      └──────────────┘   │  Louvain)        │
                                         └──────────────────┘
 ```
-
-### 9.3 Can We Simplify? Merger Candidates Analysis
-
-| Merge Candidate | External Deps Gained | Verdict | Rationale |
-|---|---|---|---|
-| **Core + Neo4j** → single package | Neo4j.Driver 6.3.0 | ❌ **Do not merge** | Core is usable without Neo4j (in-memory stubs, testing). Merging forces every consumer to pull the driver (~4 MB + native deps) even when they only need service interfaces. This is the most valuable split in the system. |
-| **Core + Observability** → single package | OpenTelemetry.Api | ⚠️ **Possible but not recommended** | OTel.Api is light (~200 KB), but making it mandatory violates the opt-in principle. Libraries shouldn't force telemetry on consumers. Keep separate. |
-| **Extraction.Llm + Core** → single package | *None new* (same M.E.AI dep) | ⚠️ **Plausible** | Extraction.Llm depends on Core and shares the M.E.AI.Abstractions dependency. *However*, keeping it separate lets users deploy Core without any LLM extraction cost, which is valid for read-only or manually-curated memory use cases. **Defer until user feedback says otherwise.** |
-| **Enrichment + Core** → single package | M.E.Http, M.E.Caching | ❌ **Do not merge** | Enrichment adds HttpClient factory and caching infrastructure — real runtime overhead that most consumers won't need. |
-| **AgentFramework + SemanticKernel** → single package | Both MS.Agents + SK | ❌ **Do not merge** | Different frameworks, different consumers. A MAF user may not want SK. Each pulls a distinct SDK. |
-| **Extraction.AzureLanguage + Extraction.Llm** → single package | Azure.AI.TextAnalytics | ❌ **Do not merge** | Azure SDK is ~12 transitive packages. LLM extraction is lightweight. Merging forces Azure SDK on LLM-only users. The whole point of extraction backends is pick-one-or-both. |
-| **McpServer + anything** | MCP SDK + Hosting | ❌ **Do not merge** | MCP is an executable deployment unit, not a library. It has fundamentally different packaging concerns (hosting, stdio/SSE transport). |
-
-### 9.4 Recommendation: Keep Current Package Topology
-
-**The current package topology is justified.** Each package isolates a genuine external dependency that would otherwise pollute consumers who don't need it. The four strongest splits are:
-
-1. **Abstractions ↔ everything** — minimal-dep contracts (industry standard pattern: cf. M.E.Logging.Abstractions)
-2. **Core ↔ Neo4j** — driver isolation (the most impactful split)
-3. **Extraction.AzureLanguage ↔ Extraction.Llm** — pick-your-backend without inheriting the other's SDK
-4. **McpServer ↔ library packages** — executable vs. library concern separation
-
-The only debatable merge is **Extraction.Llm → Core**, and even that should be deferred. The naming convention is clear and the solution file organizes them well.
 
 ### 9.5 Consumer Use-Case Matrix
 

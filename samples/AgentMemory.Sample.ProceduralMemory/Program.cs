@@ -160,5 +160,5 @@ static async Task RunAsync(IServiceProvider rootServices)
     logger.LogInformation(
         "[4] The second run starts from that ordering instead of rediscovering it. "
         + "Measured on a task built to need it, this removes one tool call from every "
-        + "attempt after the first (docs/reviews/procedural-benefit-result.md).");
+        + "attempt after the first (docs/performance/procedural-benefit-result.md).");
 }

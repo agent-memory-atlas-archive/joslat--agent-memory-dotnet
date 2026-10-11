@@ -23,7 +23,7 @@ internal enum LongMemEvalQueryFormulation
 /// <b>The last untested retrieval lever.</b> The query has always been the question text, used
 /// verbatim — no rewriting, no expansion, no hypothetical-answer generation. Decision rules and the
 /// expected ceiling are pre-registered in
-/// <c>docs/reviews/query-formulation-preregistration.md</c>; read that before reading any number this
+/// <c>strategy/performance/prereg/query-formulation-preregistration.md</c>; read that before reading any number this
 /// produces.
 /// </para>
 /// <para>

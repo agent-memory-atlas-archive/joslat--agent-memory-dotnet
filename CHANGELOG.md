@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Separate public documentation from private development records: move implementation plans,
+  research snapshots, experiment preregistrations, and internal findings out of `docs/reviews`;
+  retain three measured-result reports under `docs/performance` and update their references.
+  Extract historical roadmap/package-merger analysis and the unpublished token-cost pilot while
+  preserving public architecture and token-accounting guidance.
+
 ### Added
 
 - **Dreaming as consolidation operations** (`ConsolidationOptions.CloseGenericEntities`, `CloseUnsaidPreferences`,

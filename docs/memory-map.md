@@ -256,7 +256,7 @@ conversation (`LivePreferenceSources`), and asks an `IPreferenceSourceCheck` (th
 model) per source message; only a "guess" is closed, and a failed or unreadable answer closes nothing. Both are dry runs
 unless asked, list every proposal (`ConsolidationReport.Proposals`), and close only approved proposals when
 `ApprovedProposals` is given. BUILT; WIRED only to the CLI verb and to a host that calls `ConsolidateAsync`; MEASURED in
-the router arena as the passes P4s and P3q (`strategy/papers/memory-dreaming/EVIDENCE.md` 7, 10), not yet through this
+the router arena as the passes P4s and P3q (internal experiment records 7 and 10), not yet through this
 code on a stored world.
 
 **"A POLE+O model."** POLE+O is real as a *default prompt vocabulary* and as the shape of the
@@ -916,7 +916,7 @@ Two traps, both common enough to check for by default:
 > One shipped default also moved on measurement: `MemoryOptions.TemporalQueryClocks` now defaults to
 > `ValidTimeOnly`
 > ([`MemoryOptions.cs:213`](../src/AgentMemory.Abstractions/Options/MemoryOptions.cs)), implementing
-> finding 2 of [`per-memory-type-failure-analysis.md`](reviews/per-memory-type-failure-analysis.md) —
+> finding 2 of the internal per-memory-type failure analysis —
 > the both-clocks default silently empties recall on any store whose `created_at` is import time,
 > which is every backfill and every history import.
 
@@ -924,7 +924,7 @@ Two traps, both common enough to check for by default:
 measures whether date *strings* survive into the prompt, not the two-clock machinery: the prepared
 corpus stamps messages with synthetic ~1970 ordering keys and facts with the 2026 ingestion clock, so
 enabling temporal query resolution against it would *empty* the context rather than help
-([`per-memory-type-failure-analysis.md`](reviews/per-memory-type-failure-analysis.md), finding 1 —
+(the internal per-memory-type failure analysis, finding 1 —
 the ablation died for free). The same analysis produced the `TemporalQueryClocks = ValidTimeOnly`
 default above. This is the same metric-substitution trap this document warns about for procedural
 memory ([§4.3](#43-procedural-memory)), one level deeper.
@@ -996,12 +996,12 @@ Four consequences of position 1 in [§3](#3-what-makes-a-memory-system-great):
 **A closing measured note: on the benchmark corpus, the budget is no longer what binds.** Realised
 gold-session coverage on the accepted 50-question runs is **0.965 (structured) / 0.980 (hybrid)**,
 with 94–98% of questions already at 1.00 and nothing truncated on any question
-([`making-retrieval-measurable-again.md`](reviews/making-retrieval-measurable-again.md)). Accuracy
+(an internal corpus-design assessment). Accuracy
 against coverage is a step, not a slope: 100% at coverage ≥ 0.75, collapsing to 22.7% in the
 0.50–0.74 band — completeness is worth ~80 points, and the system does not enter the regime where it
 loses them. This is why nine quality experiments (~1,800 calls) moved nothing: six architectural
 candidates were eliminated because the instrument has been out-run, not because memory stopped
-mattering ([`quality-effort-and-what-did-not-move.md`](reviews/quality-effort-and-what-did-not-move.md)).
+mattering (the internal quality-experiment retrospective).
 The costed way to make retrieval measurable again is a pre-registered budget sweep on the frozen
 corpus — a ranking instrument only, never quoted as accuracy — and it should not run until there is a
 candidate worth ranking. Cross-referenced from [§8.6](#86-isolation-pushed-into-the-index), which this
@@ -1038,7 +1038,7 @@ with the rules for citing them.
 **The bands.** On LongMemEval-S (50 questions), **structured memory scores 76.0–90.0% and hybrid
 84.0–90.0%** across two accepted runs of the same configuration — bands, not points: structured moved
 14 points between accepted runs, so any single-number claim is unsupported
-([`longmemeval-results.md`](reviews/longmemeval-results.md)). The controls bound it: no-memory **0%**
+([`longmemeval-results.md`](performance/longmemeval-results.md)). The controls bound it: no-memory **0%**
 (0/19 over two runs), full history **80–100%** at **122,605 tokens/question** against structured's
 403 — the full-history band reached at 1/304th of the context. Raw scored 90.0%, but on one run, a
 different corpus, and a harness-rejected attribution check, so it carries an asterisk.
@@ -1046,14 +1046,14 @@ different corpus, and a harness-rejected attribution check, so it carries an ast
 **Per type, on the most recent accepted run:** semantic **25/25 (100%)** structured; temporal
 **18/21 (85.7%)** — the one type with a measured ±0.0 band across runs; episodic **2/4 at n=4** —
 not measurable at that sample size; and metamemory (abstention) **18/20 (90%)** on a separate
-20-question sample ([`longmemeval-results.md`](reviews/longmemeval-results.md) §3). **Cite the band
+20-question sample ([`longmemeval-results.md`](performance/longmemeval-results.md) §3). **Cite the band
 and the n, never the point.**
 
 **The oracle-impossible set.** Four questions are wrong 8/8 with perfect context — handed exactly the
 evidence the dataset says answers them, no retrieval involved: `352ab8bd`, `58470ed2`, `7a8d0b71`
 (all single-session-assistant) and `bf659f65` (multi-session)
-([`quality-effort-and-what-did-not-move.md`](reviews/quality-effort-and-what-did-not-move.md) §2.1;
-[`longmemeval-results.md`](reviews/longmemeval-results.md) §5). No memory system can reach them, so
+(the internal quality-experiment retrospective §2.1;
+[`longmemeval-results.md`](performance/longmemeval-results.md) §5). No memory system can reach them, so
 every run now reports a **raw** and an **improvable** denominator side by side (90.0% vs 91.8% on the
 latest run), with the excluded ids, their evidence, and a contradiction flag that fires if one is
 ever answered correctly. For this document's episodic story the relevant one is `352ab8bd`: adjusting
@@ -1068,7 +1068,7 @@ of 24 — "partially pinnable": the provider honours the option without guarante
 therefore wired as an opt-in that narrows the noise band and does not license calling a run
 reproducible. 13 of 14 verdict flips across constant-configuration repeats occurred with **identical
 retrieved items**, so a meaningful share of the noise band is the answer call, not memory
-([`quality-effort-and-what-did-not-move.md`](reviews/quality-effort-and-what-did-not-move.md) §2.2).
+(the internal quality-experiment retrospective §2.2).
 
 The honest table. Read the status column strictly. The **layer** column is the product vocabulary from
 [§2](#2-two-vocabularies-three-memory-layers-six-memory-types), so a reader who arrived with those
@@ -1095,7 +1095,7 @@ reasoning layer as a promoted trace.
 
 **The number behind the label:** structured **25/25 (100%)** on the most recent accepted run, hybrid
 22/25 (88%) — per-type split and citation rules in [§6.0](#60-what-the-benchmark-measured)
-([`longmemeval-results.md`](reviews/longmemeval-results.md) §3).
+([`longmemeval-results.md`](performance/longmemeval-results.md) §3).
 
 - Node kinds: `Entity`, `Fact`, `Preference` —
   [`MemoryNodeKind.cs`](../src/AgentMemory.Abstractions/Domain/MemoryNodeKind.cs).
@@ -1197,7 +1197,7 @@ entry. The grep that once returned nothing now returns plenty: `TraceKind`, `Pro
   `ProcedureTrustClause` resolving the issue-#92 conflict in which the shipped prompt told the model
   to ignore recalled procedures.
 
-**Measured** ([`procedural-benefit-result.md`](reviews/procedural-benefit-result.md)): on the rail
+**Measured** ([`procedural-benefit-result.md`](performance/procedural-benefit-result.md)): on the rail
 task, **one tool call saved on every attempt after the first** against a 0.00-noise control
 (procedures 5.2 vs control 6.0 mean tool calls, 100% completion on both arms; witness
 `proceduresInContextPerAttempt = [0,1,2,3,3]`) — an existence proof, not an effect size. Of three
@@ -1207,7 +1207,7 @@ archive task exposed that promotion stores the exploration, not the solution: 12
 calls were decoys.
 
 **Retrieval precision is separately instrumented**
-([`procedure-retrieval-precision-result.md`](reviews/procedure-retrieval-precision-result.md)): at
+([`procedure-retrieval-precision-result.md`](performance/procedure-retrieval-precision-result.md)): at
 the shipped `MinSimilarityScore` of 0.7, procedure retrieval **never abstains** — thresholds
 0.00–0.86 are all identical — and the knee is **0.92** (wrongRate 5%, precision-when-answering
 92.3%), so procedures need their own, much higher threshold than facts.
@@ -1294,7 +1294,7 @@ changes behaviour at a threshold ([§4.5](#45-meta-memory)).
   even contain this?"
 
 **Measured (abstention):** **18/20 (90%)** on both arms, on the benchmark's 20-question abstention
-subset ([`per-memory-type-failure-analysis.md`](reviews/per-memory-type-failure-analysis.md)). The
+subset (the internal per-memory-type failure analysis). The
 shared failure shape is over-answering on a **false presupposition**: the question names something
 that never happened, retrieval returns the semantically nearest rows, and a near-match renders into
 the prompt identically to an exact match — one probe read sufficiency 0.92 on a question unanswerable
@@ -1453,7 +1453,7 @@ developed part of the system after semantic memory:
   MAF surface, with `ProcedureTrustClause` automatically appended so the untrusted-content framing
   from issue #92 no longer instructs the model to ignore the feature — before this shipped, the fix
   lived only in the benchmark harness
-  ([`procedural-benefit-result.md`](reviews/procedural-benefit-result.md) §3a). With the flag off,
+  ([`procedural-benefit-result.md`](performance/procedural-benefit-result.md) §3a). With the flag off,
   `MafTypeMapper` still emits `t.Task` and nothing else: no outcome, no success flag, no steps, no
   tool calls.
 - **Two shipped samples report a persistence that does not happen.**
@@ -1466,9 +1466,9 @@ developed part of the system after semantic memory:
   layer end to end through real recall: traces recorded, promoted, retrieved by task similarity,
   admitted into the prompt (witness `proceduresInContextPerAttempt = [0,1,2,3,3]`) and shown to
   change agent behaviour — one tool call saved on the rail task
-  ([`procedural-benefit-result.md`](reviews/procedural-benefit-result.md)); retrieval precision is
+  ([`procedural-benefit-result.md`](performance/procedural-benefit-result.md)); retrieval precision is
   separately instrumented
-  ([`procedure-retrieval-precision-result.md`](reviews/procedure-retrieval-precision-result.md)).
+  ([`procedure-retrieval-precision-result.md`](performance/procedure-retrieval-precision-result.md)).
   What remains true: the LongMemEval evaluation corpus contains no reasoning traces. The corpus probe
   [`k6-trace-probe.json`](../artifacts/evaluation/k6-trace-probe.json) (2026-08-09) reports
   **traces: 0, steps: 0** against 10,382 entities and 14,621 messages, with `task_embedding_idx` and
@@ -1541,7 +1541,7 @@ locked in on our side by passing tests, which is what makes them worth writing d
   `MATCH (:Person)` written against upstream will not match our nodes. **Caveat on this one:** the
   upstream source read here is a v0.1.0 checkout, while the committed parity snapshot describes
   v0.5.0 and states upstream writes uppercase. The snapshot's own confidence note
-  (`strategy/reference/schema-parity-assessment.md`) rates its non-DDL sections MEDIUM because
+  (internal schema-parity assessment) rates its non-DDL sections MEDIUM because
   `graph/queries.py` was summarised rather than read line by line, and the uppercase claim matches an
   upstream *docstring* rather than upstream's implementation. **This is unresolved for v0.5.0 and
   needs a v0.5.0 checkout to settle.**
@@ -1651,8 +1651,8 @@ episodic fact extraction, this added **no** claimant to the starved fact channel
 second-attempt cost can be measured ([§4.3](#43-procedural-memory)) — was built rather than waited
 for (`--procedural-benefit`, `--procedure-retrieval`; building the harness was part of the cost, and
 was counted as such). The results are
-[`procedural-benefit-result.md`](reviews/procedural-benefit-result.md) and
-[`procedure-retrieval-precision-result.md`](reviews/procedure-retrieval-precision-result.md).
+[`procedural-benefit-result.md`](performance/procedural-benefit-result.md) and
+[`procedure-retrieval-precision-result.md`](performance/procedure-retrieval-precision-result.md).
 
 **The known limits belong in this record as much as the positive result:** only one of three tasks
 discriminates (the incident task was solved cold by the control — hence the fifth validity rule, *the
@@ -1762,7 +1762,7 @@ tenant added; the corpus that would show it moving accuracy is not the one we ha
 
 The obvious next retrieval lever — rewriting the retrieval query instead of using the question
 verbatim — was built, pre-registered, run, and **retired**
-([`query-formulation-result.md`](reviews/query-formulation-result.md)). The mechanism demonstrably
+(the internal query-formulation experiment). The mechanism demonstrably
 fired: the rewriter was invoked 50/50 and changed the query 50/50, and the retrieved item IDs changed
 on every hybrid question. Hybrid moved exactly **0.0000** on accuracy, session coverage and turn
 coverage — a strong null: retrieval responded, the measured thing did not, because at 0.980 coverage

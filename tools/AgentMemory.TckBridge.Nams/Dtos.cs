@@ -5,7 +5,7 @@ namespace AgentMemory.TckBridge.Nams;
 // JsonNamingPolicy.SnakeCaseLower, matching the direct-backend AgentMemory.TckBridge's own convention.
 //
 // These are bridge-local translation records, NOT direct reuse of AgentMemory.Nams.Domain types -- see
-// docs/reviews/NAMS_TckPlatinumBridge_PlanningAndImplementationPlan.md for the full field-by-field research
+// strategy/NAMS/implementation/NAMS_TckPlatinumBridge_PlanningAndImplementationPlan.md for the full field-by-field research
 // this is based on. None of these reuse a Nams domain record directly, even where a shape looks like it
 // matches exactly (e.g. NamsEntityFeedbackResult, NamsReasoningStep, NamsQueryResult): every Nams domain
 // record carries explicit JsonPropertyName attributes in NAMS's own camelCase wire casing, which always

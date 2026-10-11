@@ -9,6 +9,9 @@ What AgentMemory costs you per agent turn, how that cost is measured, and how to
 | [baseline-1.3.0.md](baseline-1.3.0.md) | The measured cost model for release 1.3.0 |
 | [bulk-ingestion.md](bulk-ingestion.md) | Loading a backlog without degrading p99 for everyone else in the process |
 | [token-breakdown.md](token-breakdown.md) | What answering from memory costs against sending the whole transcript |
+| [longmemeval-results.md](longmemeval-results.md) | Historical LongMemEval-S results, variance, and limits on interpretation |
+| [procedural-benefit-result.md](procedural-benefit-result.md) | Procedural-memory benefit measurement and validity rules |
+| [procedure-retrieval-precision-result.md](procedure-retrieval-precision-result.md) | Procedure retrieval precision, abstention, and threshold tradeoffs |
 
 ---
 
@@ -313,8 +316,7 @@ AgentMemory defaults and their controlled-host milliseconds are not deployment l
 
 The unified response reduces provider capacity and token cost, but not one-unit wall time because the
 four original category calls already overlap. The wall-time lever is bounded concurrency across
-independent owners. The next gate integrates that evidence into the prepared LongMemEval cold-build
-path and must project the fixed ten-question build below 15 minutes before another full build is run.
+independent owners.
 
 ---
 

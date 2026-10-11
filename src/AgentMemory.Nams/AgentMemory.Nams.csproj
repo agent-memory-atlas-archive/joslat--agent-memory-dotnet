@@ -3,7 +3,7 @@
   <PropertyGroup>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Description>Additive NAMS (Neo4j Agent Memory as a Service) backend for AgentMemory for .NET. Configuration surface plus a low-level REST client and error model -- no recall/persistence integration into the memory pipeline yet. See docs/reviews/NAMS_Phase2_LowLevelClientAdapter_PlanningAndImplementationPlan.md.</Description>
+    <Description>Additive NAMS (Neo4j Agent Memory as a Service) backend for AgentMemory for .NET. Configuration surface plus a low-level REST client and error model -- no recall/persistence integration into the memory pipeline yet. See docs/architecture.md for package boundaries.</Description>
     <PackageTags>agent-memory;nams;neo4j</PackageTags>
   </PropertyGroup>
 

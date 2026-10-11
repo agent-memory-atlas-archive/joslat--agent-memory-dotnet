@@ -8,7 +8,7 @@ namespace AgentMemory.Nams.Client;
 /// this interface (engineering plan §7 Phase 2, "Rule").
 ///
 /// Started (Phase 2) with only the 4 operations confirmed against the pinned OpenAPI snapshot
-/// (<c>docs/reviews/nams-openapi-snapshot-2026-07-17.json</c>); a 5th method the plan's own example included --
+/// (<c>strategy/NAMS/snapshots/nams-openapi-snapshot-2026-07-17.json</c>); a 5th method the plan's own example included --
 /// <c>SearchMessagesAsync</c> -- was deliberately dropped at the time as unconfirmed. Both that method and
 /// <see cref="ListEntitiesAsync"/> (Phase 9) have since been confirmed against the live NAMS SaaS and added --
 /// see each method's own doc comment for when/why.

@@ -105,8 +105,7 @@ var memoryProvider = sp.GetRequiredService<Neo4jMemoryContextProvider>();
 
 ## Related docs
 
-- [Phase 6 write-up](../../docs/reviews/NAMS_Phase6_DedicatedMafProvider_PlanningAndImplementationPlan.md) —
-  how `NamsMemoryContextProvider` gates/delimits recalled NAMS content with the same #92 security machinery
-  the direct provider uses.
-- [NAMS engineering plan](../../strategy/NAMS/AgentMemory_NAMS_Backend_Engineering_Plan_V04.md) — the full
-  phase-by-phase plan this sample is Phase 11 of.
+- [NAMS architecture](../../docs/architecture.md#35-nams-hosted-backend-packages--shipped-nuget-130) —
+  backend packages, recall, persistence, and security boundaries.
+- [Security threat model](../../docs/security/threat-model.md) — recalled-content trust boundaries
+  and host responsibilities.

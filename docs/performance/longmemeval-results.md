@@ -53,7 +53,7 @@ Three things drive that spread, and only the first is about memory:
 1. **Extraction nondeterminism** — the two runs were built from different corpora.
 2. **Answer-model nondeterminism** — the answer call runs at temperature 1.0, which this deployment
    refuses to let us lower. Measured directly: the same question answered 6 times returned
-   **19 distinct texts in 24 calls**. See `quality-effort-and-what-did-not-move.md` §2.2.
+   **19 distinct texts in 24 calls**. This diagnostic comes from an internal quality-experiment retrospective.
 3. **Judge disagreement** on borderline answers.
 
 **Report the band.** A point estimate from one run of this benchmark is not reproducible, and we have

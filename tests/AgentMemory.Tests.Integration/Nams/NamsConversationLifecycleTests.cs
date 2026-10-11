@@ -8,7 +8,7 @@ namespace AgentMemory.Tests.Integration.Nams;
 /// <summary>
 /// Live tests for the Phase 10f TCK Platinum conversation-lifecycle/context additions:
 /// <see cref="INamsClient.ListConversationsAsync"/> and <see cref="INamsClient.GetObservationsAsync"/>. See
-/// <c>docs/reviews/NAMS_Phase10f_ConversationLifecycleContext_PlanningAndImplementationPlan.md</c> for the live
+/// <c>strategy/NAMS/implementation/NAMS_Phase10f_ConversationLifecycleContext_PlanningAndImplementationPlan.md</c> for the live
 /// probe that informed this design -- including a second, in-CI-adjacent attempt at a genuinely-asserted
 /// "observations eventually appear" test that was removed after it actually failed on a 150s bound (25
 /// messages), proving the worker's timing isn't reliably reproducible within a live-test-friendly budget. The

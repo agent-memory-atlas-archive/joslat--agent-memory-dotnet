@@ -2,7 +2,7 @@ namespace AgentMemory.Nams.Persistence;
 
 /// <summary>
 /// Persists one agent turn's messages to NAMS in a single bulk write. See
-/// <c>docs/reviews/NAMS_Phase5_PostTurnPersistence_PlanningAndImplementationPlan.md</c> for the delivery
+/// <c>strategy/NAMS/implementation/NAMS_Phase5_PostTurnPersistence_PlanningAndImplementationPlan.md</c> for the delivery
 /// guarantee this provides (best-effort, at-most-once from the client's perspective -- no confirmed NAMS
 /// idempotency exists to retry against).
 /// </summary>

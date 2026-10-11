@@ -9,7 +9,7 @@ namespace AgentMemory.Nams.Recall;
 /// -- using the same <c>IMemoryContextAdmissionPolicy</c>/<c>RecalledMemoryDelimiter</c>/<c>MemoryTrustLevel</c>
 /// machinery the direct backend already uses (#92) -- before it ever reaches a model. <c>AgentMemory.Nams</c>
 /// cannot do that gating itself (it has zero sibling-package references by design, B9); see
-/// <c>docs/reviews/NAMS_Phase4_RecallAndContextMapping_PlanningAndImplementationPlan.md</c> §1.</para>
+/// <c>strategy/NAMS/implementation/NAMS_Phase4_RecallAndContextMapping_PlanningAndImplementationPlan.md</c> §1.</para>
 /// </summary>
 public sealed record NamsRecalledItem
 {

@@ -8,7 +8,7 @@ namespace AgentMemory.Tests.Integration.Nams;
 /// Live tests for the Phase 10h TCK Platinum reasoning/provenance additions: <see cref="INamsClient.RecordReasoningStepAsync"/>,
 /// <see cref="INamsClient.ListReasoningStepsAsync"/>, <see cref="INamsClient.RecordToolCallAsync"/>,
 /// <see cref="INamsClient.GetReasoningTraceAsync"/>, and <see cref="INamsClient.GetEntityProvenanceAsync"/>. See
-/// <c>docs/reviews/NAMS_Phase10h_ReasoningProvenance_PlanningAndImplementationPlan.md</c> for the design.
+/// <c>strategy/NAMS/implementation/NAMS_Phase10h_ReasoningProvenance_PlanningAndImplementationPlan.md</c> for the design.
 /// Unlike Phase 10f's observations, recording and immediately reading back a reasoning step/tool call is a
 /// direct, synchronous write/read with no async worker delay (confirmed live) -- so those get genuine
 /// positive-assertion tests. Provenance links to async entity extraction (the same family as observations), so

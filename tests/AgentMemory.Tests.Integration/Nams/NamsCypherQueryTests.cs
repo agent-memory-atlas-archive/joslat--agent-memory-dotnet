@@ -7,7 +7,7 @@ namespace AgentMemory.Tests.Integration.Nams;
 
 /// <summary>
 /// Live tests for the Phase 10i TCK Platinum Cypher query console: <see cref="INamsClient.ExecuteCypherQueryAsync"/>.
-/// See <c>docs/reviews/NAMS_Phase10i_CypherQueryConsole_PlanningAndImplementationPlan.md</c> for the design and
+/// See <c>strategy/NAMS/implementation/NAMS_Phase10i_CypherQueryConsole_PlanningAndImplementationPlan.md</c> for the design and
 /// for why this phase specifically required the user's explicit go-ahead before implementation (unlike Phase
 /// 10e-10h). <see cref="ExecuteCypherQueryAsync_WriteAttempt_IsRejectedByTheServer"/> is the single most
 /// important test in this phase: it re-confirms, as part of the merged suite (not just a one-off research
