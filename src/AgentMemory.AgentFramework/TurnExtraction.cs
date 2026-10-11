@@ -24,7 +24,8 @@ internal static class TurnExtraction
         AgentFrameworkOptions options,
         IBackgroundExtraction? background,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? applicationId = null)
     {
         // Here, not at each entry point, so every one of them honours it (review round 3: two did not).
         if (options.ExtractFromUserMessagesOnly)
@@ -45,10 +46,14 @@ internal static class TurnExtraction
             var context = ExecutionContext.Capture();
             var turn = Activity.Current?.Context;
             var scopes = (background as BackgroundExtractionQueue)?.Scopes;
-            if (background.TryEnqueue(OrderingKey(request.UserId, request.SessionId),
-                    token => context is null
+            Func<CancellationToken, Task> work = token => context is null
                         ? RunQueuedAsync(scopes, memoryService, request, logger, turn, token)
-                        : InContext(context, () => RunQueuedAsync(scopes, memoryService, request, logger, turn, token))))
+                        : InContext(context, () => RunQueuedAsync(scopes, memoryService, request, logger, turn, token));
+            var key = OrderingKey(request.UserId, request.SessionId);
+            var accepted = options.IncludePendingTurns && background is BackgroundExtractionQueue queue
+                ? queue.TryEnqueueTurn(key, work, request, applicationId)
+                : background.TryEnqueue(key, work);
+            if (accepted)
             {
                 return;
             }

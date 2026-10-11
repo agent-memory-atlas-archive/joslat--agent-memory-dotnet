@@ -19,6 +19,7 @@ public sealed class Neo4jMicrosoftMemoryFacade
     private readonly Neo4jChatMessageStore _messageStore;
     private readonly AgentFrameworkOptions _options;
     private readonly IBackgroundExtraction? _backgroundExtraction;
+    private readonly IMemoryStoreContext? _storeContext;
     private readonly ILogger<Neo4jMicrosoftMemoryFacade> _logger;
     private readonly IMemoryContextAdmissionPolicy _admissionPolicy;
 
@@ -35,6 +36,18 @@ public sealed class Neo4jMicrosoftMemoryFacade
     {
     }
 
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Neo4jMicrosoftMemoryFacade(
+        IMemoryService memoryService,
+        Neo4jChatMessageStore messageStore,
+        IOptions<AgentFrameworkOptions> options,
+        ILogger<Neo4jMicrosoftMemoryFacade> logger,
+        IMemoryContextAdmissionPolicy? admissionPolicy,
+        IBackgroundExtraction? backgroundExtraction)
+        : this(memoryService, messageStore, options, logger, admissionPolicy, backgroundExtraction, null)
+    {
+    }
+
     [Microsoft.Extensions.DependencyInjection.ActivatorUtilitiesConstructor]
     public Neo4jMicrosoftMemoryFacade(
         IMemoryService memoryService,
@@ -42,8 +55,10 @@ public sealed class Neo4jMicrosoftMemoryFacade
         IOptions<AgentFrameworkOptions> options,
         ILogger<Neo4jMicrosoftMemoryFacade> logger,
         IMemoryContextAdmissionPolicy? admissionPolicy = null,
-        IBackgroundExtraction? backgroundExtraction = null)
+        IBackgroundExtraction? backgroundExtraction = null,
+        IMemoryStoreContext? storeContext = null)
     {
+        _storeContext = storeContext;
         _backgroundExtraction = backgroundExtraction;
         _memoryService = memoryService ?? throw new ArgumentNullException(nameof(memoryService));
         _messageStore = messageStore ?? throw new ArgumentNullException(nameof(messageStore));
@@ -63,6 +78,20 @@ public sealed class Neo4jMicrosoftMemoryFacade
     /// returning only recent messages.
     /// </summary>
     public async Task<IReadOnlyList<ChatMessage>> GetContextForRunAsync(
+        IReadOnlyList<ChatMessage> messages,
+        string sessionId,
+        string conversationId,
+        string? userId = null,
+        CancellationToken cancellationToken = default)
+    {
+        var pending = PendingTurnContext.Snapshot(_backgroundExtraction, _options,
+            _storeContext?.ApplicationId, userId, sessionId);
+        var context = await GetStoredContextForRunAsync(messages, sessionId, conversationId, userId, cancellationToken)
+            .ConfigureAwait(false);
+        return PendingTurnContext.Append(pending, context, messages, _options.ContextFormat, _admissionPolicy, _logger, mark: false);
+    }
+
+    private async Task<IReadOnlyList<ChatMessage>> GetStoredContextForRunAsync(
         IReadOnlyList<ChatMessage> messages,
         string sessionId,
         string conversationId,
@@ -180,7 +209,8 @@ public sealed class Neo4jMicrosoftMemoryFacade
                         Messages = internalMessages,
                         SessionId = sessionId,
                         UserId = userId
-                    }, _options, _backgroundExtraction, _logger, cancellationToken).ConfigureAwait(false);
+                    }, _options, _backgroundExtraction, _logger, cancellationToken,
+                    _storeContext?.ApplicationId).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

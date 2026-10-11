@@ -3,6 +3,12 @@
 A reference for what agent memory is, what a memory system has to decide that a store does not, and
 **exactly** which of those decisions AgentMemory makes today.
 
+**Pending-turn visibility — BUILT / WIRED, not benchmark-measured.** The Agent Framework adapter can
+include outstanding same-store, same-owner, same-session user turns while its built-in queue extracts
+long-term memory. `IncludePendingTurns` is off by default and uses history admission and deduplication.
+Failed attempts return to ordinary persisted-history coverage; this is not durable retry or a guarantee
+of successful extraction. See [the adapter guide](agent-framework.md#reading-a-turn-while-it-is-still-being-learned).
+
 This is not a feature page. Several sections below describe things this library does not do, does
 partially, or does in a way that has never been measured. That is the point: a memory map that only
 lists strengths is a brochure, and you cannot plan against a brochure.

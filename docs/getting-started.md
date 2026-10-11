@@ -2,6 +2,11 @@
 
 **Prerequisites covered:** .NET 8, 9, or 10, Neo4j, NuGet packages, DI configuration, first memory store.
 
+For Agent Framework hosts using background extraction, opt into pending-turn context with
+`services.AddAgentMemoryFramework(options => options.IncludePendingTurns = true);`.
+This keeps outstanding user turns visible within the same store, owner and session while they are
+being learned. See [limits and lifecycle](agent-framework.md#reading-a-turn-while-it-is-still-being-learned).
+
 ---
 
 ## 1. Prerequisites

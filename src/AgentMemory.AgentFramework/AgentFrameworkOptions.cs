@@ -76,6 +76,15 @@ public sealed class AgentFrameworkOptions
     public bool ExtractInBackground { get; set; } = true;
 
     /// <summary>
+    /// Includes this store, owner's and session's outstanding user turns as short-term context while
+    /// the built-in background queue learns them. Default false: no pending-turn tracking or prompt changes.
+    /// Uses the existing admission policy and history budget; custom extraction schedulers are not tracked.
+    /// Entries leave the buffer when the attempt finishes, including failure or cancellation; persisted
+    /// messages remain available through ordinary history. This is not a durable retry queue.
+    /// </summary>
+    public bool IncludePendingTurns { get; set; }
+
+    /// <summary>
     /// Places the recalled memory just before the user's latest message instead of after it (G-13). MAF
     /// appends a context provider's messages after the request, so the model reads the question and then
     /// the memory; Llama 3 models (measured: llama3.2 3B and llama3.1 8B) read a system message in last

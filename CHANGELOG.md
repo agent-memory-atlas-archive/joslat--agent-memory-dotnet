@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pending-turn context for Agent Framework** (`AgentFrameworkOptions.IncludePendingTurns`, off by
+  default): the built-in extraction queue supplies outstanding user turns to the context provider,
+  history provider and facade, scoped by store, owner and session. Existing admission and deduplication
+  apply; completed, failed and cancelled attempts leave the buffer. No durable retry or schema change.
+
 - **Dreaming as consolidation operations** (`ConsolidationOptions.CloseGenericEntities`, `CloseUnsaidPreferences`,
   `OwnerId`, `ApprovedProposals`; `ConsolidationReport.Proposals`; `IPreferenceSourceCheck`; experimental `AMDREAM001`;
   off by default, and a consolidation run stays a dry run unless asked). The Dreaming jar's round 1-2 winner, as the

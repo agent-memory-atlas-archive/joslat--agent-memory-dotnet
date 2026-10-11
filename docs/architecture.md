@@ -8,6 +8,15 @@
 
 ## 1. Vision & Goals
 
+**Agent Framework pending-turn visibility:** `AgentFrameworkOptions.IncludePendingTurns` is an opt-in
+projection from the existing `BackgroundExtractionQueue`. `TurnExtraction` registers user turns with
+their application, owner and session; completion removes them even on failure or shutdown cancellation.
+The shared `PendingTurnContext` applies history admission, deduplication and a bounded rendering budget
+for the context provider, history provider and facade. Snapshotting before recall covers completion
+racing with recall. No new repository, schema or model calls are involved. Off, turns are not tracked
+and prompt content is unchanged. Custom schedulers and durable retry are outside this capability.
+See [configuration and lifecycle](agent-framework.md#reading-a-turn-while-it-is-still-being-learned).
+
 ### What It Is
 
 Agent Memory for .NET is a **native .NET implementation of graph-native persistent memory for AI agents**, backed by Neo4j. It provides three memory layers — short-term (conversations), long-term (entities, facts, preferences, relationships), and reasoning (traces, steps, tool calls) — that persist across agent sessions and runs. The system is designed as a **framework-agnostic core** with an adapter model that enables integration with Microsoft Agent Framework, GraphRAG, MCP, and future frameworks. *(Spec §1.2–1.3)*

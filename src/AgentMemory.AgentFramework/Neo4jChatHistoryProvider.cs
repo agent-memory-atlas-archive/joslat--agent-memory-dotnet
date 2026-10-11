@@ -104,6 +104,15 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
     internal async Task<IReadOnlyList<ChatMessage>> PerformProvideAsync(
         string sessionId, string? userId, CancellationToken cancellationToken = default)
     {
+        var pending = PendingTurnContext.Snapshot(_backgroundExtraction, _options,
+            _storeContext?.ApplicationId, userId, sessionId);
+        var history = await ProvideStoredHistoryAsync(sessionId, userId, cancellationToken).ConfigureAwait(false);
+        return PendingTurnContext.Append(pending, history, [], _options.ContextFormat, _admissionPolicy, _logger, mark: false);
+    }
+
+    private async Task<IReadOnlyList<ChatMessage>> ProvideStoredHistoryAsync(
+        string sessionId, string? userId, CancellationToken cancellationToken = default)
+    {
         try
         {
             var recallResult = await _memoryService.RecallAsync(
@@ -225,7 +234,8 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
                         Messages = turnMessages,
                         SessionId = sessionId,
                         UserId = userId
-                    }, _options, _backgroundExtraction, _logger, cancellationToken).ConfigureAwait(false);
+                    }, _options, _backgroundExtraction, _logger, cancellationToken,
+                    _storeContext?.ApplicationId).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -278,4 +288,4 @@ public sealed class Neo4jChatHistoryProvider : ChatHistoryProvider
     // MemoryOwnerScopingAgent (#90), which wraps the complete invocation for that guarantee. See also
     // docs/reviews/review-2026-06-13-cycle3.md (finding #4).
     private IDisposable? ApplyOwnerContext(string? userId) => _ownerContext?.BeginOwnerScope(userId);
-}
+}

@@ -390,6 +390,34 @@ public class Neo4jMemoryContextProvider : AIContextProvider
         DateTimeOffset? deltaCheckpoint = null,
         AgentSession? session = null)
     {
+        var pending = PendingTurnContext.Snapshot(_backgroundExtraction, _agentOptions,
+            _storeContext?.ApplicationId, userId, sessionId);
+        if (pending.Count == 0)
+            return await BuildRecalledContextAsync(messages, sessionId, conversationId, cancellationToken,
+                userId, deltaCheckpoint, session).ConfigureAwait(false);
+
+        var liveThread = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
+        using var ownerScope = _ownerContext?.BeginOwnerScope(userId);
+        var result = await BuildRecalledContextAsync(liveThread, sessionId, conversationId, cancellationToken,
+            userId, deltaCheckpoint, session).ConfigureAwait(false);
+        return new AIContext
+        {
+            Instructions = result.Instructions,
+            Tools = result.Tools,
+            Messages = PendingTurnContext.Append(pending, result.Messages?.ToList() ?? [],
+                s_fullThread.Value?.Value ?? liveThread, _formatOptions, _admissionPolicy, _logger, mark: true),
+        };
+    }
+
+    private async Task<AIContext> BuildRecalledContextAsync(
+        IEnumerable<ChatMessage> messages,
+        string sessionId,
+        string conversationId,
+        CancellationToken cancellationToken,
+        string? userId = null,
+        DateTimeOffset? deltaCheckpoint = null,
+        AgentSession? session = null)
+    {
         // Set the ambient owner BEFORE recall so the LLM-invokable facade tools the agent calls mid-turn
         // (search_memory / remember_* etc.) scope to this owner instead of running unscoped. Scoped (not a
         // bare assignment) so the value is restored once this hook returns rather than leaking into
@@ -792,7 +820,8 @@ public class Neo4jMemoryContextProvider : AIContextProvider
                         Messages = turnMessages,
                         SessionId = sessionId,
                         UserId = userId
-                    }, _agentOptions, _backgroundExtraction, _logger, cancellationToken).ConfigureAwait(false);
+                    }, _agentOptions, _backgroundExtraction, _logger, cancellationToken,
+                    _storeContext?.ApplicationId).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

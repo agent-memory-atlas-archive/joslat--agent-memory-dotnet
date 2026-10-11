@@ -32,6 +32,28 @@ so no bespoke agent loop is required: you register the provider on the agent and
 
 ## The three memory types
 
+### Reading a turn while it is still being learned
+
+The built-in background extraction queue lets the answer return before long-term extraction finishes.
+Enable `AgentFrameworkOptions.IncludePendingTurns` alongside `ExtractInBackground` (already true by
+default) to make outstanding user turns available to the next answer. The context provider, history
+provider and facade include pending text only for the same application/store, owner and session,
+using their existing admission policy. Text already in the assembled context or live thread is
+suppressed where the surface has that thread available. Pending text is conversation history, not an
+extracted fact.
+
+`IncludePendingTurns` defaults to false. Each context adds at most `ContextFormat.MaxChatHistoryMessages`
+pending user messages after admission and deduplication; zero disables this addition. This is an
+additional budget beside normal recall. The newest pending messages are rendered chronologically.
+The normal recall wait still applies; `RecallWaitsForPendingExtraction = TimeSpan.Zero` avoids it.
+
+Only the built-in queue supplies this buffer; custom `IBackgroundExtraction` schedulers do not.
+Entries leave when their attempt finishes, including partial failure or cancellation. This feature
+does not retry failed attempts: persisted raw messages remain available through normal history.
+A restart loses outstanding work and the buffer. Queue backlog remains unbounded, as before.
+
+### Stored memory layers
+
 | Layer | What it stores |
 |---|---|
 | **Short-term** | Conversations, messages, ordering, sessions, roles, timestamps, embeddings. |

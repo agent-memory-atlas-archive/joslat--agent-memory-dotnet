@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using AgentMemory.Abstractions.Domain;
 
 namespace AgentMemory.AgentFramework;
 
@@ -19,6 +20,27 @@ internal sealed class BackgroundExtractionQueue : IBackgroundExtraction, IAsyncD
     private TaskCompletionSource _idle = Completed();
     private int _pending;
     private bool _closed;
+    private readonly Dictionary<long, PendingTurn> _turns = new();
+    private long _nextTurn;
+
+    private sealed record PendingTurn(string? ApplicationId, ExtractionRequest Request);
+
+    internal IReadOnlyList<Message> GetPendingTurns(string? applicationId, string? userId, string sessionId)
+    {
+        lock (_gate)
+            return _turns.Values
+                .Where(t => t.ApplicationId == applicationId && t.Request.UserId == userId && t.Request.SessionId == sessionId)
+                .SelectMany(t => t.Request.Messages)
+                .Where(m => string.Equals(m.Role, "user", StringComparison.OrdinalIgnoreCase))
+                .DistinctBy(m => m.MessageId)
+                .Reverse()
+                .OrderByDescending(m => m.TimestampUtc)
+                .ToArray();
+    }
+
+    internal bool TryEnqueueTurn(string orderingKey, Func<CancellationToken, Task> work,
+        ExtractionRequest request, string? applicationId) =>
+        Enqueue(orderingKey, work, new PendingTurn(applicationId, request with { Messages = request.Messages.ToArray() }));
 
     /// <summary>
     /// Where queued work gets its services: a fresh scope per item, because the turn's own scope (an ASP.NET
@@ -41,6 +63,9 @@ internal sealed class BackgroundExtractionQueue : IBackgroundExtraction, IAsyncD
 
     /// <inheritdoc/>
     public bool TryEnqueue(string orderingKey, Func<CancellationToken, Task> work)
+        => Enqueue(orderingKey, work, null);
+
+    private bool Enqueue(string orderingKey, Func<CancellationToken, Task> work, PendingTurn? turn)
     {
         ArgumentNullException.ThrowIfNull(orderingKey);
         ArgumentNullException.ThrowIfNull(work);
@@ -53,14 +78,16 @@ internal sealed class BackgroundExtractionQueue : IBackgroundExtraction, IAsyncD
             var previous = _tails.TryGetValue(orderingKey, out var tail) ? tail : Task.CompletedTask;
             var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             _tails[orderingKey] = done.Task;
+            var turnId = ++_nextTurn;
+            if (turn is not null) _turns.Add(turnId, turn);
             // On the thread pool, not the caller's context: Task.Yield would post back to a caller's
             // SynchronizationContext or TaskScheduler, and the work would start on it.
-            _ = Task.Run(() => RunAsync(orderingKey, previous, done, work));
+            _ = Task.Run(() => RunAsync(orderingKey, previous, done, work, turnId));
         }
         return true;
     }
 
-    private async Task RunAsync(string key, Task previous, TaskCompletionSource done, Func<CancellationToken, Task> work)
+    private async Task RunAsync(string key, Task previous, TaskCompletionSource done, Func<CancellationToken, Task> work, long turnId)
     {
         var acquired = false;
         try
@@ -83,6 +110,7 @@ internal sealed class BackgroundExtractionQueue : IBackgroundExtraction, IAsyncD
             if (acquired) _slots.Release();
             lock (_gate)
             {
+                _turns.Remove(turnId);
                 if (_tails.TryGetValue(key, out var tail) && tail == done.Task) _tails.Remove(key);
                 if (--_pending == 0) _idle.TrySetResult();
             }
