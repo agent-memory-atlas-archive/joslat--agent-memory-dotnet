@@ -397,6 +397,39 @@ an empty result. Raw exception text is logged through the host logger, not copie
 Orchestration tests use controlled providers/stores to prove execution behavior. Separate fresh-Neo4j
 tests exercise actual write invariants. Explicit framework persistence callbacks, scoped reads and shared views are available below. Neither suite is a coding-memory effectiveness benchmark.
 
+## Store-aware module writes and shared closings
+
+A provider can update what its module already holds instead of duplicating it (Extensibility 0.12, W3).
+Its descriptor names `ExistingView`, a declared view of its own module; before the provider runs, the
+engine evaluates that view for the resolved owner and session and passes the records as
+`IngestionRequest.Existing`, at most `MaxExisting` records and `MaxExistingUtf8Bytes` bytes of text. A
+view that fails or refuses leaves the list empty and the provider still runs. `Existing` is filled per
+provider, ignores a caller's value and is not part of the request fingerprint. Construct the engine with
+`ModuleIngestionServices.Views`; static composition supplies them through the bound store.
+
+A keyed record is updated by proposing its own key again, as before. A proposal may also name, in
+`Replaces`, keys of records of the same type that the new record replaces: a judged closing for records
+whose identity is not a shared key, such as free-text lessons. Only an assertion can replace, never its
+own key, at most eight records. The engine asks `IMemoryClosingApprover` once per provider batch, as a
+named closing, with the user's words, the new record and each replaced record rendered by the type's
+template. Core registers the approver over the core writer's own closing policy: the same update judge,
+host chat-model fallback (`IMemoryUpdateJudgeFallback`), judge cool-down, `NamedClosingThreshold` and
+negative verdicts. A record the provider was not shown is never asked about (`NotShown`); no approver, no
+available judge, a failure or a missing answer closes nothing (`Unjudged`); a valid answer below the
+threshold is `Declined`.
+
+An approved closing is written as a non-destructive invalidation of the replaced key in the same store
+call, and so the same transaction, as the replacing record, and only when that record is admitted. Its
+outcome lists the invalidated keys in `ProposalOutcome.Closed`. Every decision is recorded in
+`RecordedProposals.Closings`, so `ReplayAsync` applies the approved ones without asking a judge again.
+
+`IngestionRequest.CoreOutcome` tells a provider what the core writer stored and closed for the same turn
+(ids, kinds and readable keys), so a module links to core records instead of restating them. The Agent
+Framework path fills it from the turn's core extraction (`PersistedMemoryTurn.CoreWrite`) when the module
+work runs: on the background queue that is after core's work for the same owner, inline after the core
+write. It is never waited for; with no core extraction, or a failed one, it is null. When present it is
+part of the request fingerprint.
+
 ## Transactional Neo4j module writes
 
 `AgentMemory.Extensibility.Neo4j.Storage.Neo4jModuleStore` binds a public transaction runner, frozen
@@ -856,8 +889,9 @@ services.AddAgentMemoryFrameworkModuleSelection(new ModuleSelectionOptions
 Without this registration, the provider retains its existing direct rendering and performs no
 candidate projection, selector or observer resolution. Registration snapshots contributor limits;
 it does not install a gate implementation. With `UseJudge = false` (the default), even a registered
-throwing IMemoryGate factory remains untouched. With explicit on, only eligible admitted candidates
-cause lazy resolution of the scoped configured gate. No credentials or alternate judge are discovered.
+throwing IMemoryGate factory remains untouched. With explicit on, module candidates are judged in the core
+gate's own call (next section); the provider never resolves a second, module-only judge. No credentials or
+alternate judge are discovered.
 The compiler must be bound to the intended `ModuleResolution`; unbound contributions are rejected
 by projection with an observable reason, not assigned invented module identities.
 
@@ -871,7 +905,7 @@ retained for compiled consumers. Contributor reads keep the existing owner/store
 
 An optional scoped `IModuleSelectionObserver` receives the compiled envelope and exact selection
 result, including source references, omitted items and actual judge attempts. The host lazily resolves
-both gate and observer inside the turn's application and compiler-resolved owner scope, then restores
+the observer inside the turn's application and compiler-resolved owner scope, then restores
 the prior ambient values. Store diagnostic receipts under that scope; do not use a singleton mutable
 last-result property or expose raw result data as unrestricted trace tags. Observer construction/callback
 failure is logged without private exception text and does not discard selected context; caller
@@ -880,5 +914,98 @@ cancellation still propagates. Empty module compositions do not compile, judge o
 Tests exercise actual provider DI, strict/default and stateful custom admission, provenance, negative
 judgments, outages, exact UTF-8 boundaries, opt-outs, observer failure and owner/application restoration
 using deterministic substitutes. This is native wiring proof, not real Neo4j selection acceptance or a
-model-quality measurement. No shared deadline, owned draining lease or dynamic unload is added by this
-registration; these remain explicit unfinished acceptance work.
+model-quality measurement. A statically composed process never reloads modules, so no draining lease is
+needed; dynamic loading and unloading come after 2.0.
+
+## Module candidates in the core gate's call
+
+With selection and `UseJudge` on, the extensible provider compiles and admits module views while core
+recall searches, and hands the admitted, bounded candidates to core recall as `RecallRequest.Companions`.
+`GatedMemoryContextAssembler` awaits them after its own wide search, for at most the gate's timeout, and
+then gives the judge its own full timeout: one call judges core and module memories together. Companion
+keys that are empty, repeated or equal to a core key are dropped. The gate keeps core memories by its own
+rule, exactly as without companions, and returns the companions' probabilities on
+`MemoryContext.CompanionDecisions`; the module selection applies its own threshold, item and byte limits
+and receipts to them.
+
+A companion task that fails or misses its wait costs the companions only: core is judged alone. A judge
+failure or timeout sends core to the similarity floor as before and leaves the companions undecided but
+recorded as offered (`gate.companionsOffered`), so receipts show `OfferedToJudge` for an attempted call.
+Without a judging gate (none registered, `Floor`, `Everything`, or as-of recall), `CompanionDecisions`
+stays null and module items keep their bounded admitted fallback with `ModuleJudgeOutcome.Unavailable`.
+A host with no module contributors sends no companions: its recall and context are byte-identical to
+before. `Neo4jMemoryContextProvider` exposes the hand-off as a protected `ProvideAIContextAsync` overload
+taking a `CompanionRecall`; companions are never serialized with a request.
+
+## Static module activation
+
+`AddAgentMemoryModules` composes modules for the process lifetime in one call. A module assembly carries
+its manifest and one public, parameterless `IAgentMemoryModule`; a host can also add a manifest with a
+configuration delegate. `Configure` runs at registration and only declares: one options type, context
+contributors and ingestion providers, whose factories run once per scope after activation.
+
+```csharp
+services.AddAgentMemoryModules(modules => modules
+    .UseNeo4jStore()                       // AgentMemory.Extensibility.Neo4j
+    .Add<TopicsModule>()                   // a module package: embedded manifest + IAgentMemoryModule
+    .Add(reviewsManifest, m =>
+    {
+        m.Configure<ReviewOptions>(new ReviewOptionsValidator());
+        m.AddContextContributor(c => new ViewContributor(c.Resolution, c.Reader, "open", 100, _ => new()));
+    }));
+services.AddAgentMemoryFrameworkExtensibility();
+services.AddAgentMemoryFrameworkModuleIngestion(); // writes through the set's IModuleIngestion
+```
+
+Activation is lazy and fails closed. The first resolve of `ModuleSet`, or of anything built on it (the
+compiler, contributors, `IModuleIngestion`, `IModuleStore`), resolves the composition against the host's
+actual registrations with the same `ModuleHostProfileResolver` the CLI uses: without `UseProfile`, an
+implicit one-store profile pins each added module's exact version. It then binds each module's options
+from its profile `configuration` section, or `AgentMemory:Modules:<moduleId>`, validates them with the
+module's validator and any host-registered `IValidateOptions<T>`, and freezes the set. Any problem
+throws `ModuleActivationException` listing all of them. Resolve `ModuleSet` at startup to fail there.
+Options are bound once; configuration changes need a restart.
+
+A module that needs a model declares host feature `Inference` in its manifest (`requires.host`), and the
+host grants one explicitly with `GrantChatClient(sp => ...)`; model access is composition, never ambient
+discovery. Without a grant such a module does not activate, and `ModuleActivationContext.ChatClient` refuses
+a module that does not declare the feature. The CLI and resolvers accept `Inference` as a target-host
+feature; one list (`ModuleHostFeatures`) defines every feature they know.
+
+Every identity a module adds must be in its own namespace: a contributor, each of its section types and
+an ingestion provider must be `<moduleId>:<local>`. The compiler already refused identities outside every
+resolved module; activation also refuses one module speaking for another. `ModuleSet.Fingerprint` hashes
+the composition fingerprint, the store resolution, each module's implementation assembly and build id, a
+hash of its bound configuration, and the trust mode (`static-reference`: NuGet's restore-time trust in
+referenced packages). Configuration values enter only as a hash; keep secrets in host services rather
+than module options. Static composition binds one module store; signed runtime loading, reload and
+leases come after 2.0.
+
+## Conformance kit: module packs
+
+A module pack is a validation pack (`agentmemory-pack/1`, `AgentMemory.Validation`, held) with a `modules`
+part: the modules it needs (id and version range), teach steps, the module records the store must then
+hold, and the views that must return them. The pack plays the model: each teach step carries recorded
+proposals, and for each replacement a proposal names, the judge's recorded probability. The host
+composes the modules exactly as it does in production, through `ValidationPackRunner.Modules`
+(`modules => modules.Add<TModule>()`); the runner binds them to the pack's Neo4j store, applies their
+migrations and checks the pack against the real pipeline.
+
+- **Teach.** A step names a pack session (its owner writes; `#n` in a proposal's source ids is the
+  session's nth message), a provider identity in a required module, and optionally `existingView`. The
+  proposals go through `ModuleIngestion` with that store, the host's isolation policy, the view and
+  Core's closing approver, so admission, closings at the core writer's threshold, transactions and
+  versions are the shipped ones. Each `expect` names a proposal's outcome and the keys it must close.
+- **Records.** For an owner, module, type and key: `live` (and the values it must carry), `closed` or
+  `absent`, and optionally how many versions.
+- **Views.** A declared view for an owner, optionally narrowed by arguments or pinned to a transaction
+  time: the keys it must return and no others, text that must and must not be rendered, and an
+  isolation check that no other pack owner's record comes back.
+
+Every expectation is its own check in the run result, so a wrong record, a missing closing or another
+owner's record never disappears into a total. A pack whose modules the host did not compose, or that
+do not activate, fails its composition check. The integration tests run a fixture module pack and six
+mutation controls (a wrong expected key, a missing teach step, a judge that declines, rendered excluded
+text, a wrong value, no composition); each must fail the check that names it. Module packs run in
+library tests and hosts today; a standalone conformance command needs runtime module loading and comes
+with signed loading after 2.0.

@@ -6,6 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Give the experimental 0.x packages (Extensibility, Extensibility.AgentFramework, Extensibility.Neo4j, Validation)
+  their own release line: `preview-v0.x.y-<prerelease>` tags pack only them, at the tag's version through
+  `-p:PreviewVersion`, so their core dependencies keep the core version; the core release must be on NuGet first.
+  `eng/release-lines.sh` is now the one reader of `eng/release-packages.txt`, and `eng/check-release-manifest.sh` its
+  one consistency check, for CI and the release workflow alike.
+
+- Add the experimental conformance kit to validation packs: a pack's `modules` part teaches recorded
+  module proposals through the real ingestion pipeline (admission, closings at the core writer's
+  threshold, transactions) and checks module records, views, time pins and owner isolation one by one.
+  The host composes the modules through `ValidationPackRunner.Modules`.
+
+- Add store-aware experimental module writes. A provider can see its module's existing records through a
+  declared view (`IngestionProviderDescriptor.ExistingView`) and name the records its new one replaces
+  (`ModuleProposal.Replaces`). The new public `IMemoryClosingApprover` decides each replacement with the
+  core writer's own closing policy. An approved closing invalidates the replaced record in the same
+  transaction; decisions are recorded so replay asks no judge. A module that declares host feature
+  `Inference` receives the chat model the host grants (`ModuleSetBuilder.GrantChatClient`), and only then.
+  `IngestionRequest.CoreOutcome` carries what the core writer stored and closed for the same turn; on the
+  Agent Framework path it comes from `PersistedMemoryTurn.CoreWrite`.
+
+- Add experimental static module activation: `AddAgentMemoryModules` composes modules once per process
+  through `IAgentMemoryModule` entries or manifests with a configuration delegate. Activation resolves
+  against the host's actual registrations, binds and validates each module's options, refuses identities
+  outside the adding module's namespace and fingerprints the set; it fails closed and never reloads.
+  `UseNeo4jStore` binds module records to the host's Neo4j database. Existing explicit wiring is unchanged.
+
+- The System One gate no longer fails a whole decision when only a module's memory type goes unanswered: companions are
+  marked (`MemoryGateCandidate.Companion`), a companion-only type that no judge answers stays unanswered, and core memories
+  are judged as without modules (their calls are byte-identical).
+
+- Judge module candidates in the core retrieval gate's one call. `RecallRequest.Companions` carries them,
+  `MemoryContext.CompanionDecisions` returns their probabilities, and native module selection applies its
+  own limits to them instead of calling a separate module judge. Core memories are kept exactly as before;
+  without module contributors recall and context are byte-identical.
+
 - Wire experimental native module selection through explicit registration. Reuse the provider's
   effective admission/escaping, preserve core messages/tools, and expose scoped result observation.
   Judge and observer resolution run under the compiled owner/application scope. Existing constructors

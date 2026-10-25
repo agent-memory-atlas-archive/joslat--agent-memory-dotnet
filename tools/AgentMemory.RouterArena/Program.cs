@@ -87,6 +87,35 @@ switch (args.FirstOrDefault())
         return await new ModelAsk(Console.Out).RunAsync(Matrix.Read(paths.Matrix), Get("out") ?? Path.Combine(runs, "model-lane-v2.json"),
             dryRun, Limit(), int.Parse(Get("workers") ?? "4", CultureInfo.InvariantCulture));
     }
+    case "ask-chat":
+    {
+        // R-chat-judge: the library's chat-model gate on a set's recorded gate pairs, one call a turn; the date is the
+        // recording's, as JEV was told.
+        var pairs = Get("pairs") ?? Path.Combine(runs, "gate-pairs-all.jsonl");
+        var folder = Path.GetDirectoryName(Path.GetFullPath(pairs))!;
+        DateTimeOffset now;
+        if (Get("now") is { } given) now = DateTimeOffset.Parse(given, CultureInfo.InvariantCulture);
+        else if (new[] { "recording-fresh.json", "recording-v4.json" }.Select(f => Path.Combine(folder, f)).FirstOrDefault(File.Exists) is { } recording)
+            now = (DateTimeOffset)System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(recording))!["askedAt"]!;
+        else
+        {
+            Console.WriteLine($"error: ask-chat: no recording beside {pairs}; pass --now");
+            return 1;
+        }
+        Microsoft.Extensions.AI.ReasoningEffort? effort = Get("effort") is { } e
+            ? Enum.Parse<Microsoft.Extensions.AI.ReasoningEffort>(e, ignoreCase: true) : null;
+        var defaultOut = effort is null ? "jev-chat-glm.json" : $"jev-chat-glm-{effort.ToString()!.ToLowerInvariant()}.json";
+        return await new ChatGateAsk(Console.Out).RunAsync(pairs, Get("out") ?? Path.Combine(folder, defaultOut), now,
+            dryRun, Limit(), int.Parse(Get("workers") ?? "4", CultureInfo.InvariantCulture), Get("model"), effort);
+    }
+    case "ext-lessons":
+    {
+        // EXT-measure M1: the Repository Lessons writer on the coding pilot's eight frozen digests.
+        var evidence = Get("evidence") ?? Path.Combine(Get("data") ?? "strategy", "coding", "evaluation-2026-10-14", "memory-effectiveness-audit", "evidence.zip");
+        var outPath = Get("out") ?? Path.Combine(Get("data") ?? "strategy", "performance", "runs", "2026-10-25_ext-measure", "m1-lessons.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
+        return await new LessonRetention(Console.Out).RunAsync(evidence, outPath, dryRun, Limit(), Get("model"));
+    }
     case "ask-jev":
     {
         var paths = Paths();
